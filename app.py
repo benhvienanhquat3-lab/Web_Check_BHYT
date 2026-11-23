@@ -41,6 +41,7 @@ from checker import (  # noqa: E402
     read_input_dataframe,
     run_check,
 )
+from bed_manager import page_bed_management
 
 # ======================= CẤU HÌNH CHUNG =======================
 DATA_REF_DIR = os.path.join(BASE_DIR, 'data_ref')
@@ -58,6 +59,7 @@ DK_COLORS = {
 
 PAGE_SCAN = "🔍 Soi lỗi XML3 (6 ĐK)"
 PAGE_CATALOG = "📂 Quản lý Danh mục Cổng"
+PAGE_BED = "🛏️ Sơ đồ & Kiểm tra Giường"
 MAX_ALL_ROWS = 2000
 OPT_ALL_ROWS = f"Tất cả (≤{MAX_ALL_ROWS:,})"
 
@@ -605,7 +607,7 @@ def build_sidebar(admin=True):
         st.markdown("**🧭 Chức năng**")
         page = st.radio(
             "Điều hướng",
-            options=[PAGE_SCAN, PAGE_CATALOG],
+            options=[PAGE_SCAN, PAGE_BED, PAGE_CATALOG],
             label_visibility="collapsed",
         )
         st.markdown("---")
@@ -1042,6 +1044,8 @@ def main():
 
     if page == PAGE_SCAN:
         page_scan(ref_path, admin=admin)
+    elif page == PAGE_BED:
+        page_bed_management(ref_path, admin=admin, render_kpi_fn=render_kpi_row)
     else:
         page_catalog(ref_path, admin=admin)
 
