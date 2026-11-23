@@ -20,7 +20,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 try:
-    from st_aggrid import AgGrid, GridOptionsBuilder, DataReturnMode, GridUpdateMode
+    from st_aggrid import AgGrid, GridOptionsBuilder, DataReturnMode, GridUpdateMode, JsCode
     HAS_AGGRID = True
 except ImportError:
     HAS_AGGRID = False
@@ -246,7 +246,9 @@ def render_excel_table(df, key, height=620, editable_cols=None):
     ]:
         if narrow_col in df.columns:
             gb.configure_column(narrow_col, width=w, minWidth=w)
-
+    for hidden_col in ["Dòng", "Mã DV", "Mã DV_check"]:
+        if hidden_col in df.columns:
+            gb.configure_column(hidden_col, hide=True)
     if "Đã sửa" in editable_cols and "Đã sửa" in df.columns:
         gb.configure_column(
             "Đã sửa",
@@ -264,7 +266,18 @@ def render_excel_table(df, key, height=620, editable_cols=None):
         )
 
     gb.configure_column("::auto_unique_id::", hide=True)
+    red_check_style = JsCode("""
+    function(params) {
+        return {
+            'color': '#d92d20',
+            'fontWeight': '500'
+        };
+    }
+    """)
 
+    for col in df.columns:
+        if "check" in str(col).lower():
+            gb.configure_column(col, cellStyle=red_check_style)
     gb.configure_grid_options(
         headerHeight=32,
         floatingFiltersHeight=30,
@@ -327,6 +340,7 @@ def render_excel_table(df, key, height=620, editable_cols=None):
         data_return_mode=DataReturnMode.FILTERED_AND_SORTED,
         update_mode=upd_mode,
         key=key,
+        allow_unsafe_jscode=True,
     )
     filtered = resp.get("data")
     if filtered is not None:
