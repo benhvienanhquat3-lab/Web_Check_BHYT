@@ -25,9 +25,65 @@ from io import BytesIO
 from collections import defaultdict
 from datetime import datetime
 import time
+import re
 
 import numpy as np
 import pandas as pd
+
+_DONG_IN_DETAIL_RE = re.compile(r"\(\s*Dòng\s+(\d+)\s*\)", re.IGNORECASE)
+
+
+def extract_paired_row(chi_tiet_loi: str) -> str:
+    """Lấy số dòng đối chiếu bên trong '(Dòng ...)' của cột Chi tiết lỗi."""
+    if not chi_tiet_loi:
+        return ""
+    m = _DONG_IN_DETAIL_RE.search(str(chi_tiet_loi))
+    return m.group(1).strip() if m else ""
+
+
+def deduplicate_symmetric_row_pairs(df_th: pd.DataFrame) -> pd.DataFrame:
+    """
+    Sắp xếp theo STT tăng dần để dòng có STT nhỏ hơn luôn đứng trước,
+    sau đó loại bỏ chiều ngược lại (B -> A) nếu cùng Loại lỗi & Mã DV.
+    """
+    if df_th is None or df_th.empty:
+        return df_th
+    if "Dòng" not in df_th.columns or "Chi tiết lỗi" not in df_th.columns:
+        return df_th
+
+    df = df_th.copy()
+
+    # Đảm bảo STT nhỏ hơn luôn đứng trước
+    if "STT" in df.columns:
+        stt_num = pd.to_numeric(df["STT"], errors="coerce")
+        df = (
+            df.assign(_stt_sort=stt_num)
+            .sort_values(by=["_stt_sort", "STT"], ascending=True, na_position="last", kind="mergesort")
+            .drop(columns=["_stt_sort"])
+            .reset_index(drop=True)
+        )
+
+    seen_keys = set()
+    keep_indices = []
+
+    for idx, row in df.iterrows():
+        cur_row = str(row.get("Dòng", "") or "").strip()
+        other_row = extract_paired_row(row.get("Chi tiết lỗi", ""))
+
+        if cur_row and other_row and cur_row != other_row:
+            loai_loi = str(row.get("Loại lỗi", "") or "").strip()
+            ma_dv = str(row.get("Mã DV", "") or "").strip()
+            pair_sorted = tuple(
+                sorted([cur_row, other_row], key=lambda x: int(x) if x.isdigit() else x)
+            )
+            key = (loai_loi, ma_dv, pair_sorted)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+
+        keep_indices.append(idx)
+
+    return df.loc[keep_indices].reset_index(drop=True)
 
 # ===================== TÊN CỘT / HẰNG SỐ DÙNG CHUNG =====================
 COL_DK1 = 'ĐK 1: Lỗi trùng giờ'
@@ -55,11 +111,13 @@ CHITIET_COLUMNS = [
 
 # Cột chuẩn của sheet TH (tổng hợp lỗi)
 TH_COLUMNS = [
-    'STT', 'Loại lỗi', 'Chi tiết lỗi', 'Dòng',
+    'STT', 'Loại lỗi', 'Dòng',
     'Tên bệnh nhân', 'Khoa', 'Trạng thái',          # 3 cột đặt sau Dòng, trước Mã DV
     'Mã DV', 'Tên dịch vụ',
     'NGAY_TH_YL', 'NGAY_KQ', 'Mã DV_check', 'Tên dịch vụ_check',
     'NGAY_TH_YL_check', 'NGAY_KQ_check',
+    'Tên bệnh nhân_check', 'Khoa_check', 'Trạng thái_check',
+    'Chi tiết lỗi',
 ]
 
 # Cột chuẩn cho 3 sheet tham chiếu của file mẫu
@@ -558,6 +616,21 @@ def _build_results(df, mask_out, th_records_raw):
             continue
 
         row_main = df_out.loc[idx]
+        o_row = item.get('other_row')
+        ten_bn_check = ""
+        khoa_check = ""
+        trang_thai_check = ""
+
+        if o_row is not None:
+            if isinstance(o_row, (pd.Series, dict)):
+                ten_bn_check = str(o_row.get('Tên bệnh nhân', o_row.get('TEN_BN', '')) or '').strip()
+                khoa_check = str(o_row.get('Khoa', o_row.get('TEN_KHOA', o_row.get('MA_KHOA', ''))) or '').strip()
+                trang_thai_check = str(o_row.get('Trạng thái', o_row.get('TRANG_THAI', '')) or '').strip()
+            elif o_row in df.index:
+                r_other = df.loc[o_row]
+                ten_bn_check = str(r_other.get('Tên bệnh nhân', r_other.get('TEN_BN', '')) or '').strip()
+                khoa_check = str(r_other.get('Khoa', r_other.get('TEN_KHOA', r_other.get('MA_KHOA', ''))) or '').strip()
+                trang_thai_check = str(r_other.get('Trạng thái', r_other.get('TRANG_THAI', '')) or '').strip()
         loai_loi_key = item['loai_loi']
         chi_tiet_loi = item['chi_tiet_loi']
 
@@ -583,7 +656,6 @@ def _build_results(df, mask_out, th_records_raw):
         th_data_list.append({
             'STT': 0,
             'Loại lỗi': DK_TITLES[loai_loi_key],
-            'Chi tiết lỗi': chi_tiet_loi,
             'Dòng': dong,
             'Tên bệnh nhân': ten_bn,
             'Khoa': khoa,
@@ -596,16 +668,23 @@ def _build_results(df, mask_out, th_records_raw):
             'Tên dịch vụ_check': ten_dv_check,
             'NGAY_TH_YL_check': ngay_th_yl_check,
             'NGAY_KQ_check': ngay_kq_check,
+            'Tên bệnh nhân_check': ten_bn_check,
+            'Khoa_check': khoa_check,
+            'Trạng thái_check': trang_thai_check,
+            'Chi tiết lỗi': chi_tiet_loi,
             '_order_dk': dk_order[loai_loi_key],
             '_dong_int': int(dong) if dong.isdigit() else 999999,
         })
-
+            
     df_th = pd.DataFrame(th_data_list)
     if not df_th.empty:
         df_th = df_th.sort_values(by=['_order_dk', '_dong_int'])
         df_th = df_th.drop(columns=['_order_dk', '_dong_int'])
         df_th['STT'] = np.arange(1, len(df_th) + 1)
         df_th = df_th[TH_COLUMNS]
+        df_th = deduplicate_symmetric_row_pairs(df_th)
+        if not df_th.empty:
+            df_th['STT'] = np.arange(1, len(df_th) + 1)
     else:
         df_th = pd.DataFrame(columns=TH_COLUMNS)
 
