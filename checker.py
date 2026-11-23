@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 checker.py
 =======================================================================
@@ -43,15 +43,21 @@ DK_TITLES = {col: col for col in DK_COLUMNS}
 
 # Cột chuẩn của sheet chitiet (giữ nguyên như check_bhyt.py)
 CHITIET_COLUMNS = [
-    'Id', 'MA_LK', 'MA_DICH_VU', 'MA_NHOM', 'TEN_DICH_VU',
+    'Id', 'MA_LK',
+    'TENBENHNHAN', 'TEN_KHOA', 'NGAY_RA',           # nguồn 3 cột khôi phục
+    'Tên bệnh nhân', 'Khoa', 'Trạng thái',          # 3 cột hiển thị (YC2)
+    'MA_DICH_VU', 'MA_NHOM', 'TEN_DICH_VU',
     'TYLE_TT', 'MA_KHOA', 'MA_BAC_SI', 'MA_BENH', 'NGAY_YL',
-    'NGAY_TH_YL', 'NGAY_KQ', 'NGUOI_THUC_HIEN', 'MA_MAY', 'Output_Row',
+    'NGAY_TH_YL', 'NGAY_KQ', 'NGUOI_THUC_HIEN', 'MA_MAY',
+    'NGAY_VAO', 'Output_Row',
     COL_DK1, COL_DK2, COL_DK3, COL_DK4, COL_DK5, COL_DK6,
 ]
 
 # Cột chuẩn của sheet TH (tổng hợp lỗi)
 TH_COLUMNS = [
-    'STT', 'Loại lỗi', 'Chi tiết lỗi', 'Dòng', 'Mã DV', 'Tên dịch vụ',
+    'STT', 'Loại lỗi', 'Chi tiết lỗi', 'Dòng',
+    'Tên bệnh nhân', 'Khoa', 'Trạng thái',          # 3 cột đặt sau Dòng, trước Mã DV
+    'Mã DV', 'Tên dịch vụ',
     'NGAY_TH_YL', 'NGAY_KQ', 'Mã DV_check', 'Tên dịch vụ_check',
     'NGAY_TH_YL_check', 'NGAY_KQ_check',
 ]
@@ -289,6 +295,22 @@ def run_check(df, catalogs=None, ref_path="", progress_cb=None):
     df['NGAY_YL_num'] = pd.to_numeric(df['NGAY_YL'], errors='coerce')
     df['NGAY_TH_YL_num'] = pd.to_numeric(df['NGAY_TH_YL'], errors='coerce')
     df['NGAY_KQ_num'] = pd.to_numeric(df['NGAY_KQ'], errors='coerce')
+
+    # ----- YC2: Chuẩn hoá 3 cột hiển thị (Tên bệnh nhân / Khoa / Trạng thái) -----
+    # Nguồn từ file input: TENBENHNHAN, TEN_KHOA, NGAY_RA (fallback MA_KHOA)
+    for src in ('TENBENHNHAN', 'TEN_KHOA', 'NGAY_RA', 'NGAY_VAO'):
+        if src not in df.columns:
+            df[src] = ""
+        df[src] = df[src].fillna("").astype(str).str.strip()
+    # Lọc sạch chuỗi 'nan', 'None', 'NaT' tránh nhận nhầm thành 'Ra viện'
+    for src in ('TENBENHNHAN', 'TEN_KHOA', 'NGAY_RA', 'NGAY_VAO'):
+        df[src] = df[src].map(
+            lambda v: "" if str(v).lower() in ("nan", "none", "nat") else v
+        )
+    df['Tên bệnh nhân'] = df['TENBENHNHAN']
+    # Fallback MA_KHOA nếu TEN_KHOA rỗng
+    df['Khoa'] = df['TEN_KHOA'].where(df['TEN_KHOA'] != "", df['MA_KHOA'].fillna("").astype(str).str.strip())
+    df['Trạng thái'] = np.where(df['NGAY_RA'] != "", "Ra viện", "Đang điều trị")
 
     valid_mask = (df['TYLE_TT_num'] > 0) & df['NGAY_TH_YL_num'].notna() & df['NGAY_KQ_num'].notna()
     records = df[valid_mask].to_dict('records')
@@ -540,6 +562,9 @@ def _build_results(df, mask_out, th_records_raw):
         chi_tiet_loi = item['chi_tiet_loi']
 
         dong = str(row_main.get('Output_Row', ''))
+        ten_bn = str(row_main.get('Tên bệnh nhân', ''))
+        khoa = str(row_main.get('Khoa', ''))
+        trang_thai = str(row_main.get('Trạng thái', ''))
         ma_dv = str(row_main.get('MA_DICH_VU', ''))
         ten_dv = str(row_main.get('TEN_DICH_VU', ''))
         ngay_th_yl = str(row_main.get('NGAY_TH_YL', ''))
@@ -560,6 +585,9 @@ def _build_results(df, mask_out, th_records_raw):
             'Loại lỗi': DK_TITLES[loai_loi_key],
             'Chi tiết lỗi': chi_tiet_loi,
             'Dòng': dong,
+            'Tên bệnh nhân': ten_bn,
+            'Khoa': khoa,
+            'Trạng thái': trang_thai,
             'Mã DV': ma_dv,
             'Tên dịch vụ': ten_dv,
             'NGAY_TH_YL': ngay_th_yl,
