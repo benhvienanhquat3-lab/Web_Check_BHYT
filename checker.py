@@ -3,17 +3,10 @@
 checker.py
 =======================================================================
 Toàn bộ logic nghiệp vụ kiểm tra lỗi BHYT (XML3 / Excel) - 6 Điều kiện.
-Kế thừa 100% logic từ check_bhyt.py (bản desktop Tkinter), gồm:
-
-    * Đọc XML3 (giải mã Base64) và Excel  -> ``read_input_dataframe``
-    * Đọc file tham chiếu 3 sheet          -> ``load_reference_data``
-    * Tạo file mẫu ``MAU_THAM_CHIEU.xlsx`` -> ``build_template_excel_bytes``
-    * Kiểm tra đủ 6 Điều kiện              -> ``run_check``
-    * Xuất kết quả 2 sheet TH + chitiet    -> ``build_output_excel_bytes``
-
-Tối ưu tốc độ (kết quả KHÔNG đổi, đã đối chiếu 100% với bản O(n^2)):
-    * ĐK 1, 2, 4 : gom nhóm index theo ``NGUOI_THUC_HIEN`` (bác sĩ).
-    * ĐK 3       : gom nhóm index theo ``MA_MAY`` (máy).
+Đã nâng cấp:
+    * Đọc `dm_chuyenmon` kết hợp `CHUCDANH_NN = 1` & `PHAMVI_CM` (129/132 full công khám).
+    * Kiểm tra hiệu lực `DEN_NGAY` của NVYT (sau DEN_NGAY -> ngoài danh mục).
+    * Đọc 2 cột cờ `Check_dùng máy` (ĐK 6) và `check trùng khoảng` (ĐK 4) trong `data_dvkt`.
 =======================================================================
 """
 
@@ -53,7 +46,6 @@ def deduplicate_symmetric_row_pairs(df_th: pd.DataFrame) -> pd.DataFrame:
 
     df = df_th.copy()
 
-    # Đảm bảo STT nhỏ hơn luôn đứng trước
     if "STT" in df.columns:
         stt_num = pd.to_numeric(df["STT"], errors="coerce")
         df = (
@@ -85,6 +77,7 @@ def deduplicate_symmetric_row_pairs(df_th: pd.DataFrame) -> pd.DataFrame:
 
     return df.loc[keep_indices].reset_index(drop=True)
 
+
 # ===================== TÊN CỘT / HẰNG SỐ DÙNG CHUNG =====================
 COL_DK1 = 'ĐK 1: Lỗi trùng giờ'
 COL_DK2 = 'ĐK 2: CK in time CLS'
@@ -94,14 +87,12 @@ COL_DK5 = 'ĐK 5: Lỗi Cấu Hình (BS/Máy/DVKT)'
 COL_DK6 = 'ĐK 6: Lỗi T.Gian & Thiếu Máy'
 
 DK_COLUMNS = [COL_DK1, COL_DK2, COL_DK3, COL_DK4, COL_DK5, COL_DK6]
-
 DK_TITLES = {col: col for col in DK_COLUMNS}
 
-# Cột chuẩn của sheet chitiet (giữ nguyên như check_bhyt.py)
 CHITIET_COLUMNS = [
     'Id', 'MA_LK',
-    'TENBENHNHAN', 'TEN_KHOA', 'NGAY_RA',           # nguồn 3 cột khôi phục
-    'Tên bệnh nhân', 'Khoa', 'Trạng thái',          # 3 cột hiển thị (YC2)
+    'TENBENHNHAN', 'TEN_KHOA', 'NGAY_RA',
+    'Tên bệnh nhân', 'Khoa', 'Trạng thái',
     'MA_DICH_VU', 'MA_NHOM', 'TEN_DICH_VU',
     'TYLE_TT', 'MA_KHOA', 'MA_BAC_SI', 'MA_BENH', 'NGAY_YL',
     'NGAY_TH_YL', 'NGAY_KQ', 'NGUOI_THUC_HIEN', 'MA_MAY',
@@ -109,10 +100,9 @@ CHITIET_COLUMNS = [
     COL_DK1, COL_DK2, COL_DK3, COL_DK4, COL_DK5, COL_DK6,
 ]
 
-# Cột chuẩn của sheet TH (tổng hợp lỗi)
 TH_COLUMNS = [
     'STT', 'Loại lỗi', 'Dòng',
-    'Tên bệnh nhân', 'Khoa', 'Trạng thái',          # 3 cột đặt sau Dòng, trước Mã DV
+    'Tên bệnh nhân', 'Khoa', 'Trạng thái',
     'Mã DV', 'Tên dịch vụ',
     'NGAY_TH_YL', 'NGAY_KQ', 'Mã DV_check', 'Tên dịch vụ_check',
     'NGAY_TH_YL_check', 'NGAY_KQ_check',
@@ -120,16 +110,46 @@ TH_COLUMNS = [
     'Chi tiết lỗi',
 ]
 
-# Cột chuẩn cho 3 sheet tham chiếu của file mẫu
 TEMPLATE_COLUMNS = {
-    'data_nvyt': ['MACCHN', 'SO_CCCD', 'HO_TEN', 'CHUCDANH_NN', 'PHAMVI_CM', 'Mã CK', 'Tên Công khám'],
+    'data_nvyt': ['MACCHN', 'SO_CCCD', 'HO_TEN', 'CHUCDANH_NN', 'PHAMVI_CM', 'TU_NGAY', 'DEN_NGAY'],
     'data_tbyt': ['STT', 'TEN_TB', 'KY_HIEU', 'CONGTY_SX', 'NUOC_SX', 'NAM_SX', 'NAM_SD',
                   'MA_MAY', 'SO_LUU_HANH', 'HD_TU', 'HD_DEN', 'TU_NGAY', 'DEN_NGAY', 'ID'],
-    'data_dvkt': ['MA', 'TEN', 'HIEU_LUC', 'LY_DO_TU_CHOI'],
+    'data_dvkt': ['MA', 'TEN', 'HIEU_LUC', 'Check_dùng máy', 'check trùng khoảng'],
+    'dm_chuyenmon': ['STT', 'Tên chuyên khoa', 'Mã phạm vi', 'Mã CK', 'Tên Công khám'],
 }
 
 
 # ===================== HÀM TIỆN ÍCH =====================
+def _clean_str(val):
+    s = str(val or "").strip()
+    return "" if s.lower() in ("nan", "none", "nat") else s
+
+
+def _normalize_date8(val):
+    """Chuẩn hóa ngày bất kỳ (YYYYMMDD, YYYYMMDDHHMM, dd/mm/yyyy...) -> chuỗi 8 số YYYYMMDD."""
+    s = _clean_str(val)
+    if not s:
+        return ""
+    if s.endswith(".0"):
+        s = s[:-2]
+    digits = "".join(ch for ch in s if ch.isdigit())
+    if len(digits) >= 8 and s.replace(".", "").isdigit():
+        return digits[:8]
+    try:
+        dt = pd.to_datetime(s, dayfirst=True, errors="coerce")
+        if pd.notna(dt):
+            return dt.strftime("%Y%m%d")
+    except Exception:
+        pass
+    return ""
+
+
+def _fmt_date8(d8):
+    if len(d8) == 8:
+        return f"{d8[6:8]}/{d8[4:6]}/{d8[0:4]}"
+    return d8
+
+
 def format_time_bhyt(time_str):
     """Định dạng mốc thời gian BHYT ``yyyymmddhhmm`` -> ``dd/mm/yyyy hh:mm``."""
     time_str = str(time_str).strip()
@@ -148,20 +168,29 @@ def is_co_lydo(text):
     return t == 'có' or t == 'co'
 
 
+def _find_col(columns, candidates):
+    """Tìm tên cột không phân biệt hoa/thường & khoảng trắng."""
+    norm_map = {unicodedata.normalize('NFC', str(c)).strip().lower(): c for c in columns}
+    for cand in candidates:
+        key = unicodedata.normalize('NFC', cand).strip().lower()
+        if key in norm_map:
+            return norm_map[key]
+    return None
+
+
 # ===================== ĐỌC FILE THAM CHIẾU =====================
 def load_reference_data(ref_path):
-    """Đọc 3 sheet tham chiếu cổng BHYT.
-
-    Trả về ``(catalogs, frames)`` trong đó:
-        * ``catalogs`` : dict các lookup phục vụ 6 Điều kiện.
-        * ``frames``   : dict DataFrame gốc 3 sheet (để hiển thị UI).
-    """
+    """Đọc các sheet tham chiếu cổng BHYT (data_nvyt, dm_chuyenmon, data_tbyt, data_dvkt)."""
     catalogs = {
-        'dict_ten_bs': {},          # MACCHN -> tên hiển thị
-        'ref_dict': {},             # MACCHN -> {'ma_ck_list':[...], 'display_str': ...}
-        'dict_may': {},             # MA_MAY -> {'ten_may':..., 'display_str':...}
-        'dict_dvkt_hieuluc': {},    # MA -> HIEU_LUC
-        'dict_dvkt_lydo': {},       # MA -> LY_DO_TU_CHOI
+        'dict_ten_bs': {},             # MACCHN -> tên hiển thị
+        'ref_dict': {},                # MACCHN -> info chuyên môn + hiệu lực DEN_NGAY
+        'dict_may': {},                # MA_MAY -> {'ten_may':..., 'display_str':...}
+        'dict_dvkt_hieuluc': {},       # MA -> HIEU_LUC
+        'dict_dvkt_lydo': {},          # MA -> LY_DO_TU_CHOI (legacy)
+        'dict_dvkt_dung_may': {},      # MA -> Check_dùng máy
+        'dict_dvkt_trung_khoang': {},  # MA -> check trùng khoảng
+        'has_col_dung_may': False,
+        'has_col_trung_khoang': False,
     }
     frames = {}
 
@@ -170,34 +199,108 @@ def load_reference_data(ref_path):
 
     xl = pd.ExcelFile(ref_path)
 
-    # ----- 1. Nhân viên y tế (bác sĩ) -----
+    # ----- 0. Danh mục chuyên môn (dm_chuyenmon) -----
+    # Map: mã phạm vi -> list of (ma_ck, ten_cong_kham)
+    cm_map = defaultdict(list)
+    if 'dm_chuyenmon' in xl.sheet_names:
+        df_cm = xl.parse('dm_chuyenmon', dtype=str).fillna("")
+        frames['dm_chuyenmon'] = df_cm
+        col_pv = _find_col(df_cm.columns, ['Mã phạm vi', 'MA_PHAM_VI', 'PHAMVI_CM'])
+        col_ck = _find_col(df_cm.columns, ['Mã CK', 'MA_CK'])
+        col_ten_ck = _find_col(df_cm.columns, ['Tên Công khám', 'TEN_CONG_KHAM'])
+        if col_pv:
+            for _, r in df_cm.iterrows():
+                pv = _clean_str(r.get(col_pv))
+                if pv.endswith(".0"):
+                    pv = pv[:-2]
+                ma_ck = _clean_str(r.get(col_ck)) if col_ck else ""
+                ten_ck = _clean_str(r.get(col_ten_ck)) if col_ten_ck else ""
+                if pv and (ma_ck or ten_ck):
+                    cm_map[pv].append((ma_ck, ten_ck))
+
+    # ----- 1. Nhân viên y tế (data_nvyt) -----
     sheet_bs = 'data_nvyt' if 'data_nvyt' in xl.sheet_names else 0
-    df_ref = xl.parse(sheet_bs, dtype=str)
-    df_ref.fillna("", inplace=True)
+    df_ref = xl.parse(sheet_bs, dtype=str).fillna("")
     frames['data_nvyt'] = df_ref
+
+    col_chucdanh = _find_col(df_ref.columns, ['CHUCDANH_NN', 'CHUCDANHNN'])
+    col_phamvi = _find_col(df_ref.columns, ['PHAMVI_CM'])
+    col_den_ngay = _find_col(df_ref.columns, ['DEN_NGAY', 'DENNGAY'])
+
     for _, row in df_ref.iterrows():
-        macchn = str(row.get('MACCHN', '')).strip()
-        ho_ten = str(row.get('HO_TEN', '')).strip()
-        ma_ck_chuoi = str(row.get('Mã CK', '')).strip()
-        ten_ck_chuoi = str(row.get('Tên Công khám', '')).strip()
-        if macchn:
-            ten_hien_thi = ho_ten if ho_ten else "k có tên"
-            catalogs['dict_ten_bs'][macchn] = ten_hien_thi
+        macchn = _clean_str(row.get('MACCHN', ''))
+        if not macchn:
+            continue
+        ho_ten = _clean_str(row.get('HO_TEN', ''))
+        ten_hien_thi = ho_ten if ho_ten else "k có tên"
+
+        chucdanh_nn = _clean_str(row.get(col_chucdanh, '')) if col_chucdanh else ""
+        if chucdanh_nn.endswith(".0"):
+            chucdanh_nn = chucdanh_nn[:-2]
+
+        phamvi_raw = _clean_str(row.get(col_phamvi, '')) if col_phamvi else ""
+        pv_codes = [p.strip()[:-2] if p.strip().endswith(".0") else p.strip()
+                    for p in phamvi_raw.split(';') if p.strip()]
+
+        den_ngay_8 = _normalize_date8(row.get(col_den_ngay, '')) if col_den_ngay else ""
+
+        # Xác định công khám được phép
+        allow_all_exams = False
+        ma_ck_list = []
+        ten_ck_list = []
+
+        if chucdanh_nn == '1' and pv_codes and cm_map:
+            if '129' in pv_codes or '132' in pv_codes:
+                allow_all_exams = True
+            else:
+                for pv in pv_codes:
+                    for m_ck, t_ck in cm_map.get(pv, []):
+                        if m_ck and m_ck not in ma_ck_list:
+                            ma_ck_list.append(m_ck)
+                        if t_ck and t_ck not in ten_ck_list:
+                            ten_ck_list.append(t_ck)
+        else:
+            # Fallback cột Mã CK / Tên Công khám cũ nếu file chưa có dm_chuyenmon
+            ma_ck_chuoi = _clean_str(row.get('Mã CK', ''))
+            ten_ck_chuoi = _clean_str(row.get('Tên Công khám', ''))
+            ma_ck_list = [ck.strip() for ck in ma_ck_chuoi.split(';') if ck.strip()]
+            ten_ck_list = [tk.strip() for tk in ten_ck_chuoi.split(';') if tk.strip()]
+
+        catalogs['dict_ten_bs'][macchn] = ten_hien_thi
+
+        ma_ck_disp = "Tất cả (129/132)" if allow_all_exams else "; ".join(ma_ck_list)
+        ten_ck_disp = "Tất cả công khám" if allow_all_exams else "; ".join(ten_ck_list)
+
+        # Hỗ trợ trường hợp 1 MACCHN có nhiều dòng (nhiều giai đoạn DEN_NGAY)
+        if macchn not in catalogs['ref_dict']:
             catalogs['ref_dict'][macchn] = {
-                'ma_ck_list': [ck.strip() for ck in ma_ck_chuoi.split(';') if ck.strip()],
-                'display_str': f"{macchn} - {ten_hien_thi} - {ma_ck_chuoi} - {ten_ck_chuoi}",
+                'chucdanh_nn': chucdanh_nn,
+                'allow_all_exams': allow_all_exams,
+                'ma_ck_list': list(ma_ck_list),
+                'ten_ck_lower_set': set(t.lower() for t in ten_ck_list if t),
+                'den_ngay_list': [den_ngay_8],   # "" nghĩa là không giới hạn
+                'display_str': f"{macchn} - {ten_hien_thi} - PV:{phamvi_raw} - {ma_ck_disp} ({ten_ck_disp})",
             }
+        else:
+            entry = catalogs['ref_dict'][macchn]
+            entry['allow_all_exams'] = entry['allow_all_exams'] or allow_all_exams
+            for m in ma_ck_list:
+                if m not in entry['ma_ck_list']:
+                    entry['ma_ck_list'].append(m)
+            for t in ten_ck_list:
+                if t:
+                    entry['ten_ck_lower_set'].add(t.lower())
+            entry['den_ngay_list'].append(den_ngay_8)
 
     # ----- 2. Máy móc / TTB -----
     sheet_may_name = 'data_tbyt' if 'data_tbyt' in xl.sheet_names else (
         1 if len(xl.sheet_names) > 1 else None)
     if sheet_may_name is not None:
-        df_may = xl.parse(sheet_may_name, dtype=str)
-        df_may.fillna("", inplace=True)
+        df_may = xl.parse(sheet_may_name, dtype=str).fillna("")
         frames['data_tbyt'] = df_may
         for _, row in df_may.iterrows():
-            ma_may = str(row.get('MA_MAY', '')).strip()
-            ten_tb = str(row.get('TEN_TB', '')).strip()
+            ma_may = _clean_str(row.get('MA_MAY', ''))
+            ten_tb = _clean_str(row.get('TEN_TB', ''))
             if ma_may:
                 ten_hien_thi = ten_tb if ten_tb else "k có tên"
                 catalogs['dict_may'][ma_may] = {
@@ -207,30 +310,31 @@ def load_reference_data(ref_path):
 
     # ----- 3. Danh mục DVKT -----
     if 'data_dvkt' in xl.sheet_names:
-        df_dvkt = xl.parse('data_dvkt', dtype=str)
-        df_dvkt.fillna("", inplace=True)
+        df_dvkt = xl.parse('data_dvkt', dtype=str).fillna("")
         frames['data_dvkt'] = df_dvkt
+
+        col_dung_may = _find_col(df_dvkt.columns, ['Check_dùng máy', 'Check_dung_may', 'CHECK_DUNG_MAY'])
+        col_trung_khoang = _find_col(df_dvkt.columns, ['check trùng khoảng', 'check_trung_khoang', 'CHECK_TRUNG_KHOANG'])
+        catalogs['has_col_dung_may'] = bool(col_dung_may)
+        catalogs['has_col_trung_khoang'] = bool(col_trung_khoang)
+
         for _, row in df_dvkt.iterrows():
-            ma_dvkt = str(row.get('MA', '')).strip()
-            hieu_luc = str(row.get('HIEU_LUC', '')).strip()
-            lydo = str(row.get('LY_DO_TU_CHOI', '')).strip()
-            if hieu_luc.lower() == 'nan':
-                hieu_luc = ""
-            if lydo.lower() == 'nan':
-                lydo = ""
-            if ma_dvkt:
-                catalogs['dict_dvkt_hieuluc'][ma_dvkt] = hieu_luc
-                catalogs['dict_dvkt_lydo'][ma_dvkt] = lydo
+            ma_dvkt = _clean_str(row.get('MA', ''))
+            if not ma_dvkt:
+                continue
+            catalogs['dict_dvkt_hieuluc'][ma_dvkt] = _clean_str(row.get('HIEU_LUC', ''))
+            catalogs['dict_dvkt_lydo'][ma_dvkt] = _clean_str(row.get('LY_DO_TU_CHOI', ''))
+            if col_dung_may:
+                catalogs['dict_dvkt_dung_may'][ma_dvkt] = _clean_str(row.get(col_dung_may, ''))
+            if col_trung_khoang:
+                catalogs['dict_dvkt_trung_khoang'][ma_dvkt] = _clean_str(row.get(col_trung_khoang, ''))
 
     return catalogs, frames
 
 
 # ===================== ĐỌC DỮ LIỆU CHÍNH =====================
 def parse_xml_to_dataframe(xml_source):
-    """Đọc file XML gốc (FILEHOSO > NOIDUNGFILE mã hoá Base64 của XML3).
-
-    ``xml_source`` có thể là đường dẫn (str) hoặc bytes.
-    """
+    """Đọc file XML gốc (FILEHOSO > NOIDUNGFILE mã hoá Base64 của XML3)."""
     try:
         if isinstance(xml_source, (bytes, bytearray)):
             root = ET.fromstring(xml_source)
@@ -305,25 +409,19 @@ def read_input_dataframe(source, filename=""):
 
 # ===================== LÕI KIỂM TRA 6 ĐIỀU KIỆN =====================
 def run_check(df, catalogs=None, ref_path="", progress_cb=None):
-    """Chạy kiểm tra 6 Điều kiện trên DataFrame dữ liệu chính.
-
-    ``progress_cb`` (tuỳ chọn) là hàm ``cb(percent: float, message: str)``.
-
-    Trả về dict:
-        ``df_out``  : DataFrame sheet ``chitiet`` (đã chuẩn hoá cột).
-        ``df_th``   : DataFrame sheet ``TH`` (tổng hợp lỗi).
-        ``stats``   : dict thống kê (tổng dòng, tổng lỗi, số lỗi theo ĐK).
-    """
+    """Chạy kiểm tra 6 Điều kiện trên DataFrame dữ liệu chính."""
     catalogs = catalogs or {}
     ref_dict = catalogs.get('ref_dict', {})
     dict_ten_bs = catalogs.get('dict_ten_bs', {})
     dict_may = catalogs.get('dict_may', {})
     dict_dvkt_hieuluc = catalogs.get('dict_dvkt_hieuluc', {})
     dict_dvkt_lydo = catalogs.get('dict_dvkt_lydo', {})
+    dict_dvkt_dung_may = catalogs.get('dict_dvkt_dung_may', {})
+    dict_dvkt_trung_khoang = catalogs.get('dict_dvkt_trung_khoang', {})
+    has_col_dung_may = catalogs.get('has_col_dung_may', False)
+    has_col_trung_khoang = catalogs.get('has_col_trung_khoang', False)
     has_ref = bool(ref_path)
 
-    df = df.copy()
-    df.fillna("", inplace=True)
     df = df.copy()
     df.fillna("", inplace=True)
     if 'Id' not in df.columns:
@@ -339,7 +437,6 @@ def run_check(df, catalogs=None, ref_path="", progress_cb=None):
     if 'NGAY_YL' not in df.columns:
         df['NGAY_YL'] = ""
 
-    # Dòng xuất ra file chitiet (loại MA_NHOM 10, 15 và TYLE_TT = 0)
     mask_out = ~df['MA_NHOM'].astype(str).str.strip().isin(['10', '15'])
     mask_out = mask_out & (pd.to_numeric(df['TYLE_TT'], errors='coerce').fillna(0) != 0)
 
@@ -354,19 +451,13 @@ def run_check(df, catalogs=None, ref_path="", progress_cb=None):
     df['NGAY_TH_YL_num'] = pd.to_numeric(df['NGAY_TH_YL'], errors='coerce')
     df['NGAY_KQ_num'] = pd.to_numeric(df['NGAY_KQ'], errors='coerce')
 
-    # ----- YC2: Chuẩn hoá 3 cột hiển thị (Tên bệnh nhân / Khoa / Trạng thái) -----
-    # Nguồn từ file input: TENBENHNHAN, TEN_KHOA, NGAY_RA (fallback MA_KHOA)
     for src in ('TENBENHNHAN', 'TEN_KHOA', 'NGAY_RA', 'NGAY_VAO'):
         if src not in df.columns:
             df[src] = ""
         df[src] = df[src].fillna("").astype(str).str.strip()
-    # Lọc sạch chuỗi 'nan', 'None', 'NaT' tránh nhận nhầm thành 'Ra viện'
-    for src in ('TENBENHNHAN', 'TEN_KHOA', 'NGAY_RA', 'NGAY_VAO'):
-        df[src] = df[src].map(
-            lambda v: "" if str(v).lower() in ("nan", "none", "nat") else v
-        )
+        df[src] = df[src].map(lambda v: "" if str(v).lower() in ("nan", "none", "nat") else v)
+
     df['Tên bệnh nhân'] = df['TENBENHNHAN']
-    # Fallback MA_KHOA nếu TEN_KHOA rỗng
     df['Khoa'] = df['TEN_KHOA'].where(df['TEN_KHOA'] != "", df['MA_KHOA'].fillna("").astype(str).str.strip())
     df['Trạng thái'] = np.where(df['NGAY_RA'] != "", "Ra viện", "Đang điều trị")
 
@@ -376,15 +467,36 @@ def run_check(df, catalogs=None, ref_path="", progress_cb=None):
     total_records = len(records)
 
     def is_check_dk4(ma_dv_can_check):
+        if has_col_trung_khoang:
+            if ma_dv_can_check in dict_dvkt_trung_khoang:
+                return is_co_lydo(dict_dvkt_trung_khoang[ma_dv_can_check])
+            return False
         if not dict_dvkt_hieuluc:
             return True
         if ma_dv_can_check in dict_dvkt_hieuluc:
             return dict_dvkt_hieuluc[ma_dv_can_check] != ""
         return True
 
+    def is_require_machine(ma_dv_can_check):
+        if has_col_dung_may:
+            return is_co_lydo(dict_dvkt_dung_may.get(ma_dv_can_check, ""))
+        return is_co_lydo(dict_dvkt_lydo.get(ma_dv_can_check, ""))
+
+    def is_bs_expired(bs_code, check_date8):
+        """Trả về (True, max_den_ngay) nếu check_date8 vượt quá DEN_NGAY của NVYT."""
+        if not check_date8 or bs_code not in ref_dict:
+            return False, ""
+        den_list = ref_dict[bs_code].get('den_ngay_list', [])
+        if not den_list or any(d == "" for d in den_list):
+            return False, ""
+        max_den = max(den_list)
+        if check_date8 > max_den:
+            return True, max_den
+        return False, ""
+
     # ----- Tiền xử lý: gom nhóm index theo bác sĩ (ĐK 1,2,4) & mã máy (ĐK 3) -----
-    doc_index = defaultdict(list)   # MACCHN -> [vị trí record] (ascending)
-    may_index = defaultdict(list)   # MA_MAY -> [vị trí record] (ascending)
+    doc_index = defaultdict(list)
+    may_index = defaultdict(list)
     for pos, rec in enumerate(records):
         for bs in [b.strip() for b in str(rec.get('NGUOI_THUC_HIEN', '')).split(';') if b.strip()]:
             doc_index[bs].append(pos)
@@ -396,7 +508,6 @@ def run_check(df, catalogs=None, ref_path="", progress_cb=None):
     if progress_cb:
         progress_cb(0.0, "Đang phân tích dữ liệu...")
 
-    # ----- Tiền xử lý thông tin mỗi record (1 lần duy nhất) -----
     info = []
     for rec in records:
         may_chuoi = str(rec.get('MA_MAY', '')).strip()
@@ -435,7 +546,11 @@ def run_check(df, catalogs=None, ref_path="", progress_cb=None):
         ngay_th = row.get('NGAY_TH_YL_num')
         ngay_kq = row.get('NGAY_KQ_num')
 
+        d8_yl = _normalize_date8(row.get('NGAY_YL', ''))
+        d8_th = _normalize_date8(row.get('NGAY_TH_YL', ''))
+
         ds_bac_si = [bs.strip() for bs in str(row.get('NGUOI_THUC_HIEN', '')).split(';') if bs.strip()]
+        ds_bs_yl = [bs.strip() for bs in str(row.get('MA_BAC_SI', '')).split(';') if bs.strip()]
         may_chuoi = str(row.get('MA_MAY', '')).strip()
         ds_may = [may_chuoi] if may_chuoi else []
 
@@ -456,9 +571,8 @@ def run_check(df, catalogs=None, ref_path="", progress_cb=None):
                 loi_dk6.append(l_str)
                 dict_th_dk6[l_str] = None
 
-        if has_ref and dict_dvkt_lydo:
-            lydo_val = dict_dvkt_lydo.get(ma_dv, "")
-            if is_co_lydo(lydo_val) and not may_chuoi:
+        if has_ref and (has_col_dung_may or dict_dvkt_lydo):
+            if is_require_machine(ma_dv) and not may_chuoi:
                 l_str = "Thiếu mã máy (Y/c ĐK 6)"
                 loi_dk6.append(l_str)
                 dict_th_dk6[l_str] = None
@@ -468,20 +582,44 @@ def run_check(df, catalogs=None, ref_path="", progress_cb=None):
             for l_str, o_row in dict_th_dk6.items():
                 th_records_raw.append({'idx': idx, 'loai_loi': COL_DK6, 'chi_tiet_loi': l_str, 'other_row': o_row})
 
-        # ----- ĐIỀU KIỆN 5 (cấu hình BS / Máy / DVKT) -----
+        # ----- ĐIỀU KIỆN 5 (cấu hình BS / Hiệu lực DEN_NGAY / Công khám / Máy / DVKT) -----
         if has_ref:
+            # Kiểm tra bác sĩ ra y lệnh (nếu có DEN_NGAY)
+            for bs_yl in ds_bs_yl:
+                if bs_yl in ref_dict:
+                    expired, max_den = is_bs_expired(bs_yl, d8_yl)
+                    if expired:
+                        l_str = f"BS ra YL ngoài danh mục / Hết hiệu lực ({bs_yl} - đến {_fmt_date8(max_den)})"
+                        loi_dk5.append(l_str)
+                        dict_th_dk5[l_str] = None
+
+            # Kiểm tra người thực hiện
             if ds_bac_si:
                 for bs in ds_bac_si:
                     if bs not in dict_ten_bs:
                         l_str = f"BS lạ ({bs})"
                         loi_dk5.append(l_str)
                         dict_th_dk5[l_str] = None
-                    elif ma_nhom == '13':
-                        ma_ck_hop_le = ref_dict[bs]['ma_ck_list']
-                        if ma_dv not in ma_ck_hop_le:
-                            l_str = f"Sai CK ({ref_dict[bs]['display_str']})"
-                            loi_dk5.append(l_str)
-                            dict_th_dk5[l_str] = None
+                        continue
+
+                    expired, max_den = is_bs_expired(bs, d8_th or d8_yl)
+                    if expired:
+                        l_str = f"BS thực hiện ngoài danh mục / Hết hiệu lực ({bs} - đến {_fmt_date8(max_den)})"
+                        loi_dk5.append(l_str)
+                        dict_th_dk5[l_str] = None
+                        continue
+
+                    if ma_nhom == '13':
+                        bs_info = ref_dict[bs]
+                        if not bs_info.get('allow_all_exams', False):
+                            ma_ck_hop_le = bs_info.get('ma_ck_list', [])
+                            ten_ck_hop_le = bs_info.get('ten_ck_lower_set', set())
+                            ok_ma = (ma_dv in ma_ck_hop_le) or any(ma_dv.startswith(ck + ".") for ck in ma_ck_hop_le)
+                            ok_ten = (ten_dv.lower() in ten_ck_hop_le) if ten_dv else False
+                            if not (ok_ma or ok_ten):
+                                l_str = f"Sai CK ({bs_info['display_str']})"
+                                loi_dk5.append(l_str)
+                                dict_th_dk5[l_str] = None
 
             if ds_may and dict_may:
                 for may in ds_may:
@@ -516,7 +654,7 @@ def run_check(df, catalogs=None, ref_path="", progress_cb=None):
         cand.discard(i)
         candidates = sorted(cand)
 
-        # ----- ĐIỀU KIỆN 1-4 (so sánh chéo trên tập ứng viên) -----
+        # ----- ĐIỀU KIỆN 1-4 -----
         for j in candidates:
             o = info[j]
             o_id = o['o_id']
@@ -631,6 +769,7 @@ def _build_results(df, mask_out, th_records_raw):
                 ten_bn_check = str(r_other.get('Tên bệnh nhân', r_other.get('TEN_BN', '')) or '').strip()
                 khoa_check = str(r_other.get('Khoa', r_other.get('TEN_KHOA', r_other.get('MA_KHOA', ''))) or '').strip()
                 trang_thai_check = str(r_other.get('Trạng thái', r_other.get('TRANG_THAI', '')) or '').strip()
+
         loai_loi_key = item['loai_loi']
         chi_tiet_loi = item['chi_tiet_loi']
 
@@ -643,7 +782,6 @@ def _build_results(df, mask_out, th_records_raw):
         ngay_th_yl = str(row_main.get('NGAY_TH_YL', ''))
         ngay_kq = str(row_main.get('NGAY_KQ', ''))
 
-        o_row = item['other_row']
         if o_row:
             ma_dv_check = str(o_row.get('MA_DICH_VU', ''))
             ten_dv_check = str(o_row.get('TEN_DICH_VU', ''))
@@ -675,7 +813,7 @@ def _build_results(df, mask_out, th_records_raw):
             '_order_dk': dk_order[loai_loi_key],
             '_dong_int': int(dong) if dong.isdigit() else 999999,
         })
-            
+
     df_th = pd.DataFrame(th_data_list)
     if not df_th.empty:
         df_th = df_th.sort_values(by=['_order_dk', '_dong_int'])
@@ -688,7 +826,6 @@ def _build_results(df, mask_out, th_records_raw):
     else:
         df_th = pd.DataFrame(columns=TH_COLUMNS)
 
-    # ----- Thống kê -----
     stats = {
         'total_input': int(len(df)),
         'total_rows': int(len(df_out)),
@@ -703,7 +840,7 @@ def _build_results(df, mask_out, th_records_raw):
 
 # ===================== XUẤT EXCEL =====================
 def build_template_excel_bytes():
-    """Tạo file Excel mẫu 3 sheet chuẩn danh mục cổng BHYT."""
+    """Tạo file Excel mẫu chuẩn danh mục cổng BHYT."""
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
         for sheet_name, columns in TEMPLATE_COLUMNS.items():
