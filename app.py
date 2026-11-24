@@ -41,7 +41,11 @@ from checker import (  # noqa: E402
     read_input_dataframe,
     run_check,
 )
-from bed_manager import page_bed_management
+from bed_manager import (  # noqa: E402
+    page_bed_management,
+    extract_bed_records,
+    save_bed_dataset,
+)
 
 # ======================= CẤU HÌNH CHUNG =======================
 DATA_REF_DIR = os.path.join(BASE_DIR, 'data_ref')
@@ -58,10 +62,13 @@ DK_COLORS = {
 }
 
 PAGE_SCAN = "🔍 Soi lỗi XML3 (6 ĐK)"
-PAGE_CATALOG = "📂 Quản lý Danh mục Cổng"
 PAGE_BED = "🛏️ Sơ đồ & Kiểm tra Giường"
+PAGE_CATALOG = "📂 Quản lý Danh mục Cổng"
 MAX_ALL_ROWS = 2000
 OPT_ALL_ROWS = f"Tất cả (≤{MAX_ALL_ROWS:,})"
+
+# Tỷ lệ độ rộng 5 ô lọc + 1 nút Đồng bộ (anh có thể tự chỉnh to/nhỏ ở đây)
+FILTER_COL_WIDTHS = [2.2, 1.6, 1.6, 1.1, 1.2, 0.45]
 
 st.set_page_config(
     layout="wide",
@@ -71,25 +78,23 @@ st.set_page_config(
 )
 
 
-# ======================= CUSTOM CSS (GỌN GÀNG - TỐI ƯU BẢNG) =======================
+# ======================= CUSTOM CSS =======================
 def inject_css():
     st.markdown(
         """
         <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-
         html, body, .stApp {
-            font-family: 'Inter','Segoe UI','Roboto',sans-serif;
+            font-family: 'Segoe UI','Roboto',sans-serif;
         }
         .stApp { background-color: #F8FAFC; }
         #MainMenu { visibility: hidden; }
         footer { visibility: hidden; }
         header[data-testid="stHeader"] { background: transparent; }
         .block-container {
-            padding-top: 0.65rem;
-            padding-bottom: 1.5rem;
-            padding-left: 1.2rem !important;
-            padding-right: 1.2rem !important;
+            padding-top: 0.55rem;
+            padding-bottom: 1.0rem;
+            padding-left: 1.1rem !important;
+            padding-right: 1.1rem !important;
             max-width: 100% !important;
         }
 
@@ -97,15 +102,15 @@ def inject_css():
         .app-header {
             display: flex; align-items: center; gap: 14px;
             background: linear-gradient(100deg,#1565C0 0%,#1E88E5 55%,#42A5F5 100%);
-            border-radius: 10px; padding: 8px 16px; margin-bottom: 10px;
+            border-radius: 10px; padding: 7px 16px; margin-bottom: 6px;
             box-shadow: 0 4px 12px rgba(21,101,192,0.18);
         }
         .app-logo {
-            height: 42px; width: 42px; border-radius: 8px; object-fit: cover;
+            height: 40px; width: 40px; border-radius: 8px; object-fit: cover;
             background: #FFFFFF; padding: 2px;
         }
         .app-title {
-            color: #FFFFFF; font-size: 17px; font-weight: 700;
+            color: #FFFFFF; font-size: 16.5px; font-weight: 700;
             letter-spacing: .3px; line-height: 1.2;
         }
         .app-sub {
@@ -118,7 +123,7 @@ def inject_css():
             font-size: 14.5px; font-weight: 700; color: #0F172A;
             margin: 4px 0 8px 0;
         }
-        .soft-note { color: #64748B; font-size: 12.5px; }
+        .soft-note { color: #64748B; font-size: 12px; white-space: nowrap; }
 
         /* ---------- Card ---------- */
         .card {
@@ -129,10 +134,10 @@ def inject_css():
         /* ---------- KPI mảnh ---------- */
         .kpi-card {
             background: #FFFFFF; border: 1px solid #E2E8F0; border-radius: 9px;
-            padding: 7px 6px; text-align: center; margin-bottom: 4px;
+            padding: 6px 6px; text-align: center; margin-bottom: 4px;
             box-shadow: 0 1px 2px rgba(15,23,42,.04);
         }
-        .kpi-value { font-size: 18px; font-weight: 700; line-height: 1.1; }
+        .kpi-value { font-size: 17px; font-weight: 700; line-height: 1.1; }
         .kpi-label {
             font-size: 10px; color: #64748B; font-weight: 600; margin-top: 2px;
             text-transform: uppercase; letter-spacing: .2px;
@@ -144,16 +149,19 @@ def inject_css():
         }
 
         /* ---------- Buttons ---------- */
-        .stButton > button, .stDownloadButton > button { border-radius: 8px; font-weight: 600; }
+        .stButton > button, .stDownloadButton > button {
+            border-radius: 7px; font-weight: 600; padding: 0.25rem 0.5rem;
+            min-height: 34px; font-size: 12.5px;
+        }
         .stButton > button[kind="primary"] { background: #1565C0; border-color: #1565C0; }
 
-        /* Thu gọn khoảng trắng giữa bảng và nút tải Excel */
         div[data-testid="stVerticalBlock"] > div:has(iframe) { margin-bottom: -14px !important; }
         hr { margin: 6px 0 !important; }
         </style>
         """,
         unsafe_allow_html=True,
     )
+
 
 def inject_close_dropdown_on_outside_click():
     """Tự đóng menu xổ xuống của multiselect/selectbox khi click ra vùng ngoài."""
@@ -189,6 +197,7 @@ def inject_close_dropdown_on_outside_click():
         width=0,
     )
 
+
 def render_header():
     logo_html = ""
     if os.path.exists(LOGO_PATH):
@@ -204,7 +213,7 @@ def render_header():
             {logo_html}
             <div class="app-header-text">
                 <div class="app-title">BỆNH VIỆN ĐA KHOA ANH QUẤT</div>
-                <div class="app-sub">HỆ THỐNG KIỂM TRA LỖI BHYT (XML3)</div>
+                <div class="app-sub">HỆ THỐNG KIỂM TRA LỖI BHYT (XML3) &amp; QUẢN LÝ GIƯỜNG BỆNH</div>
             </div>
         </div>
         """,
@@ -212,8 +221,31 @@ def render_header():
     )
 
 
+def render_top_channel_switcher():
+    """2 nút chuyển kênh chính ngay dưới banner Bệnh viện."""
+    cur = st.session_state.get("active_page", PAGE_SCAN)
+    c1, c2 = st.columns(2, gap="small")
+    with c1:
+        if st.button(
+            PAGE_SCAN,
+            type="primary" if cur == PAGE_SCAN else "secondary",
+            use_container_width=True,
+            key="nav_btn_scan",
+        ):
+            st.session_state["active_page"] = PAGE_SCAN
+            st.rerun()
+    with c2:
+        if st.button(
+            PAGE_BED,
+            type="primary" if cur == PAGE_BED else "secondary",
+            use_container_width=True,
+            key="nav_btn_bed",
+        ):
+            st.session_state["active_page"] = PAGE_BED
+            st.rerun()
+
+
 def render_kpi_row(items):
-    """items: list of (label, value, color)."""
     cols = st.columns(len(items))
     for col, (label, value, color) in zip(cols, items):
         col.markdown(
@@ -225,8 +257,7 @@ def render_kpi_row(items):
         )
 
 
-def render_excel_table(df, key, height=620, editable_cols=None):
-    """Hiển thị 1 trang dữ liệu dạng bảng kẻ ô kiểu Excel (AgGrid)."""
+def render_excel_table(df, key, height=820, editable_cols=None):
     editable_cols = set(editable_cols or [])
     if not HAS_AGGRID:
         st.dataframe(df, use_container_width=True, hide_index=True, height=height)
@@ -252,30 +283,15 @@ def render_excel_table(df, key, height=620, editable_cols=None):
         if hidden_col in df.columns:
             gb.configure_column(hidden_col, hide=True)
     if "Đã sửa" in editable_cols and "Đã sửa" in df.columns:
-        gb.configure_column(
-            "Đã sửa",
-            editable=True,
-            width=82,
-            minWidth=82,
-            cellStyle={"textAlign": "center"},
-        )
+        gb.configure_column("Đã sửa", editable=True, width=82, minWidth=82, cellStyle={"textAlign": "center"})
     if "Ghi chú" in editable_cols and "Ghi chú" in df.columns:
-        gb.configure_column(
-            "Ghi chú",
-            editable=True,
-            width=180,
-            minWidth=130,
-        )
-
+        gb.configure_column("Ghi chú", editable=True, width=180, minWidth=130)
+    if "Chi tiết lỗi" in df.columns:
+        max_len = int(df["Chi tiết lỗi"].astype(str).str.len().max() or 30)
+        w_err = min(max(max_len * 8 + 40, 380), 900)
+        gb.configure_column("Chi tiết lỗi", width=w_err, minWidth=w_err, tooltipField="Chi tiết lỗi")
     gb.configure_column("::auto_unique_id::", hide=True)
-    red_check_style = JsCode("""
-    function(params) {
-        return {
-            'color': '#d92d20',
-            'fontWeight': '500'
-        };
-    }
-    """)
+    red_check_style = JsCode("function(params) { return {'color': '#d92d20', 'fontWeight': '500'}; }")
 
     for col in df.columns:
         if "check" in str(col).lower():
@@ -283,7 +299,7 @@ def render_excel_table(df, key, height=620, editable_cols=None):
     gb.configure_grid_options(
         headerHeight=32,
         floatingFiltersHeight=30,
-        rowHeight=30,
+        rowHeight=36,
         singleClickEdit=True,
         stopEditingWhenCellsLoseFocus=True,
         enableCellTextSelection=True,
@@ -291,42 +307,23 @@ def render_excel_table(df, key, height=620, editable_cols=None):
     )
 
     custom_css = {
-        ".ag-header": {
-            "background-color": "#F8FAFC !important",
-            "border-bottom": "1px solid #CBD5E1 !important",
-        },
+        ".ag-header": {"background-color": "#F8FAFC !important", "border-bottom": "1px solid #CBD5E1 !important"},
         ".ag-header-cell": {
-            "border-right": "1px solid #E2E8F0 !important",
-            "font-size": "12.5px !important",
-            "font-weight": "600 !important",
-            "color": "#334155 !important",
-            "padding-left": "8px !important",
-            "padding-right": "8px !important",
+            "border-right": "1px solid #E2E8F0 !important", "font-size": "12.5px !important",
+            "font-weight": "600 !important", "color": "#334155 !important",
+            "padding-left": "8px !important", "padding-right": "8px !important",
         },
         ".ag-cell": {
-            "border-right": "1px solid #E2E8F0 !important",
-            "font-size": "13px !important",
-            "padding-left": "8px !important",
-            "padding-right": "8px !important",
-            "line-height": "28px !important",
+            "border-right": "1px solid #E2E8F0 !important", "font-size": "13px !important",
+            "padding-left": "8px !important", "padding-right": "8px !important", "line-height": "34px !important",
         },
-        ".ag-row": {
-            "border-bottom": "1px solid #E2E8F0 !important",
-        },
+        ".ag-row": {"border-bottom": "1px solid #E2E8F0 !important"},
         ".ag-floating-filter-input input": {
-            "height": "22px !important",
-            "min-height": "22px !important",
-            "font-size": "12px !important",
-            "padding": "0 6px !important",
-            "border-radius": "4px !important",
+            "height": "22px !important", "min-height": "22px !important",
+            "font-size": "12px !important", "padding": "0 6px !important", "border-radius": "4px !important",
         },
-        ".ag-floating-filter-button": {
-            "margin-left": "2px !important",
-        },
-        ".ag-floating-filter-button-button": {
-            "width": "18px !important",
-            "height": "18px !important",
-        },
+        ".ag-floating-filter-button": {"margin-left": "2px !important"},
+        ".ag-floating-filter-button-button": {"width": "18px !important", "height": "18px !important"},
     }
 
     upd_mode = GridUpdateMode.FILTERING_CHANGED
@@ -351,7 +348,7 @@ def render_excel_table(df, key, height=620, editable_cols=None):
     return df
 
 
-# ======================= TIỆN ÍCH FILE / STATE / PHÂN QUYỀN / ĐỒNG BỘ =======================
+# ======================= TIỆN ÍCH FILE / STATE / PHÂN QUYỀN =======================
 def load_active_ref():
     if os.path.exists(ACTIVE_REF_FILE):
         try:
@@ -408,6 +405,7 @@ def reset_th_notes():
 def clear_cached_exports():
     st.session_state.pop('_excel_full_bytes', None)
     st.session_state.pop('_excel_filtered_bytes', None)
+    st.session_state.pop('_excel_filtered_sig', None)
 
 
 def attach_notes_to_th(df_th):
@@ -419,8 +417,7 @@ def attach_notes_to_th(df_th):
 
     notes = load_th_notes()
     df = df_th.copy()
-    da_sua_list = []
-    ghi_chu_list = []
+    da_sua_list, ghi_chu_list = [], []
     for stt in df["STT"]:
         rec = notes.get(str(stt), {})
         da_sua_list.append(bool(rec.get("da_sua", False)))
@@ -433,7 +430,6 @@ def attach_notes_to_th(df_th):
 
 
 def sync_edited_notes(page_before_df, page_after_df):
-    """So sánh theo STT trong slice trang hiện tại và gộp vào notes máy chủ."""
     if page_before_df.empty or page_after_df.empty:
         return False
     if "STT" not in page_after_df.columns or "Đã sửa" not in page_after_df.columns:
@@ -480,11 +476,7 @@ def format_th_for_export(df_th):
 def save_latest_result(result, src_filename, used_ref):
     try:
         with open(LATEST_RESULT_FILE, 'wb') as fh:
-            pickle.dump({
-                'result': result,
-                'src_filename': src_filename,
-                'used_ref': used_ref,
-            }, fh)
+            pickle.dump({'result': result, 'src_filename': src_filename, 'used_ref': used_ref}, fh)
     except Exception:
         pass
 
@@ -508,6 +500,32 @@ def get_catalogs(ref_path):
     return _load_catalogs_cached(ref_path, os.path.getmtime(ref_path))
 
 
+@st.cache_data(show_spinner=False)
+def _load_visible_sheets_cached(ref_path, ref_mtime):
+    """Đọc toàn bộ các sheet ĐANG HIỆN (visible) trong file Excel tham chiếu."""
+    xl = pd.ExcelFile(ref_path)
+    visible_names = list(xl.sheet_names)
+    if ref_path.lower().endswith(('.xlsx', '.xlsm')):
+        try:
+            import openpyxl
+            wb = openpyxl.load_workbook(ref_path, read_only=True, data_only=True)
+            visible_names = [name for name in wb.sheetnames if wb[name].sheet_state == 'visible']
+            wb.close()
+        except Exception:
+            pass
+    sheets = {}
+    for name in visible_names:
+        try:
+            sheets[name] = xl.parse(name, dtype=str).fillna("")
+        except Exception:
+            continue
+    return sheets
+
+
+def get_visible_sheets(ref_path):
+    return _load_visible_sheets_cached(ref_path, os.path.getmtime(ref_path))
+
+
 def _strip_accents(text):
     s = unicodedata.normalize('NFD', str(text).lower())
     s = ''.join(ch for ch in s if unicodedata.category(ch) != 'Mn')
@@ -515,7 +533,6 @@ def _strip_accents(text):
 
 
 def match_query(df, query, columns):
-    """Lọc thông minh: bỏ dấu tiếng Việt, gõ nhiều từ rời nhau vẫn khớp."""
     if not query or df.empty:
         return df
     tokens = [t for t in _strip_accents(query).split() if t]
@@ -531,113 +548,85 @@ def match_query(df, query, columns):
     return df[mask]
 
 
-def render_pagination_bar(total_rows, page_key, size_key, info_html=""):
-    """Thanh phân trang gọn gàng, có tùy chọn Tất cả (≤2.000 dòng) để lọc full trong bảng."""
-    size_options = [100, 200, 500, OPT_ALL_ROWS]
-    if size_key not in st.session_state or st.session_state[size_key] not in size_options:
-        st.session_state[size_key] = 100
-    if page_key not in st.session_state:
-        st.session_state[page_key] = 0
-
-    col_info, col_sz, col_nav = st.columns([4.0, 1.5, 2.5], vertical_alignment="center")
-
-    with col_sz:
-        selected_sz = st.selectbox(
-            "Dòng/trang",
-            options=size_options,
-            key=size_key,
-            label_visibility="collapsed",
-        )
-
-    cap_note = ""
-    if selected_sz == OPT_ALL_ROWS:
-        if total_rows <= MAX_ALL_ROWS:
-            page_size = max(1, total_rows)
-        else:
-            page_size = MAX_ALL_ROWS
-            cap_note = f" <i>(giới hạn {MAX_ALL_ROWS:,} dòng/trang để tránh đơ)</i>"
-    else:
-        page_size = int(selected_sz)
-
-    n_pages = max(1, (total_rows + page_size - 1) // page_size)
-    page = min(max(0, int(st.session_state[page_key])), n_pages - 1)
-    st.session_state[page_key] = page
-
-    start = page * page_size
-    end = min(start + page_size, total_rows)
-
-    with col_info:
-        range_txt = f"{start + 1:,}–{end:,}" if total_rows > 0 else "0"
-        st.markdown(
-            f"<div class='soft-note'>Hiển thị <b>{range_txt}</b> / <b>{total_rows:,}</b> dòng "
-            f"{info_html}{cap_note}</div>",
-            unsafe_allow_html=True,
-        )
-
-    with col_nav:
-        b1, b2, b3, b4, b5 = st.columns([0.7, 0.7, 1.6, 0.7, 0.7], vertical_alignment="center")
-        if b1.button("«", key=f"{page_key}_first", disabled=(page <= 0), use_container_width=True):
-            st.session_state[page_key] = 0
-            st.rerun()
-        if b2.button("‹", key=f"{page_key}_prev", disabled=(page <= 0), use_container_width=True):
-            st.session_state[page_key] = page - 1
-            st.rerun()
-        b3.markdown(
-            f"<div style='text-align:center;font-size:12.5px;font-weight:600;color:#334155;'>"
-            f"{page + 1} / {n_pages}</div>",
-            unsafe_allow_html=True,
-        )
-        if b4.button("›", key=f"{page_key}_next", disabled=(page >= n_pages - 1), use_container_width=True):
-            st.session_state[page_key] = page + 1
-            st.rerun()
-        if b5.button("»", key=f"{page_key}_last", disabled=(page >= n_pages - 1), use_container_width=True):
-            st.session_state[page_key] = n_pages - 1
-            st.rerun()
-
-    return start, end, page, page_size
-
-
-# ======================= SIDEBAR =======================
+# ======================= SIDEBAR (NẠP DỮ LIỆU CHUNG + DANH MỤC CỔNG) =======================
 def build_sidebar(admin=True):
+    if "active_page" not in st.session_state:
+        st.session_state["active_page"] = PAGE_SCAN
+
     with st.sidebar:
         st.markdown("### 🩺 BHYT Anh Quất")
-        st.markdown("<div class='soft-note'>Hệ thống kiểm tra lỗi hồ sơ XML3</div>", unsafe_allow_html=True)
-        st.markdown("---")
-
-        st.markdown("**🧭 Chức năng**")
-        page = st.radio(
-            "Điều hướng",
-            options=[PAGE_SCAN, PAGE_BED, PAGE_CATALOG],
-            label_visibility="collapsed",
-        )
+        st.markdown("<div class='soft-note'>Kiểm tra XML3 &amp; Giường bệnh</div>", unsafe_allow_html=True)
         st.markdown("---")
 
         active_ref = load_active_ref()
         ref_path = active_ref
 
         if admin:
-            st.markdown("**⚙️ Cấu hình dữ liệu Cổng BHYT**")
-
-            st.download_button(
-                "📥 Tải file mẫu (MAU_THAM_CHIEU.xlsx)",
-                data=build_template_excel_bytes(),
-                file_name="MAU_THAM_CHIEU.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
+            st.markdown("**📤 1. Nạp hồ sơ kiểm tra (Excel / XML)**")
+            input_file = st.file_uploader(
+                "Chọn file Excel (.xlsx, .xls) hoặc XML (.xml)",
+                type=["xlsx", "xls", "xml"],
+                key="sidebar_data_uploader",
+                label_visibility="collapsed",
             )
+            run_btn = st.button("🚀 Quét lỗi & Nạp Giường", type="primary", use_container_width=True)
 
-            st.markdown(
-                "<div class='soft-note'>Tải lên file danh mục (NVYT / TTB / DVKT). "
-                "File sẽ được lưu vào thư mục <b>data_ref/</b> và tự động ghi nhớ.</div>",
-                unsafe_allow_html=True,
-            )
+            if run_btn:
+                if input_file is None:
+                    st.warning("Vui lòng chọn file dữ liệu trước khi quét.")
+                else:
+                    progress = st.progress(0.0, text="Đang đọc file...")
 
+                    def cb(pct, msg):
+                        progress.progress(min(max(int(pct * 100), 0), 100), text=msg)
+
+                    try:
+                        df_raw = read_input_dataframe(input_file.getvalue(), input_file.name)
+                        catalogs = {}
+                        if ref_path and os.path.exists(ref_path):
+                            catalogs, _ = get_catalogs(ref_path)
+
+                        result = run_check(df_raw, catalogs=catalogs, ref_path=ref_path or "", progress_cb=cb)
+                        st.session_state['result'] = result
+                        st.session_state['src_filename'] = input_file.name
+                        st.session_state['used_ref'] = bool(ref_path and os.path.exists(ref_path))
+                        st.session_state['th_page'] = 0
+                        st.session_state['ct_page'] = 0
+                        clear_cached_exports()
+                        save_latest_result(result, input_file.name, bool(ref_path and os.path.exists(ref_path)))
+                        reset_th_notes()
+
+                        df_bed_new = extract_bed_records(df_raw)
+                        if not df_bed_new.empty:
+                            save_bed_dataset(df_bed_new, input_file.name)
+                            st.session_state.pop("bed_applied_filter", None)
+
+                        progress.empty()
+                        st.toast(
+                            f"✅ Xong {input_file.name}: {result['stats']['total_errors']:,} lỗi XML3 • {len(df_bed_new):,} dòng giường",
+                            icon="🎉",
+                        )
+                        st.rerun()
+                    except Exception as ex:
+                        progress.empty()
+                        st.error(f"❌ Lỗi xử lý: {ex}")
+
+            cur_src = st.session_state.get('src_filename', '')
+            if not cur_src:
+                saved = load_latest_result()
+                cur_src = saved.get('src_filename', '') if saved else ''
+            if cur_src:
+                st.caption(f"📄 Đang dùng: **{cur_src}**")
+
+            st.markdown("---")
+
+            st.markdown("**⚙️ 2. Danh mục đối chiếu (Cổng BHYT)**")
             uploaded_ref = st.file_uploader(
                 "File tham chiếu (.xlsx, .xls, .ods)",
                 type=["xlsx", "xls", "ods"],
                 key="ref_uploader",
+                label_visibility="collapsed",
             )
-
             if uploaded_ref is not None:
                 safe_name = os.path.basename(uploaded_ref.name)
                 save_path = os.path.join(DATA_REF_DIR, safe_name)
@@ -651,18 +640,45 @@ def build_sidebar(admin=True):
                     st.error(f"Không lưu được file: {ex}")
 
             if ref_path and os.path.exists(ref_path):
-                st.success(f"✅ Đang dùng: {os.path.basename(ref_path)}")
-                if st.button("🔄 Xóa/Đổi file", use_container_width=True):
-                    set_active_ref("")
-                    st.session_state.pop('_catalog_cache_key', None)
-                    st.rerun()
+                st.success(f"✅ {os.path.basename(ref_path)}")
+                c_dl, c_rm = st.columns(2, gap="small")
+                with c_dl:
+                    st.download_button(
+                        "📥 File mẫu",
+                        data=build_template_excel_bytes(),
+                        file_name="MAU_THAM_CHIEU.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                    )
+                with c_rm:
+                    if st.button("🔄 Đổi file", use_container_width=True):
+                        set_active_ref("")
+                        st.rerun()
             else:
-                st.warning("⚠️ Chưa nạp file tham chiếu (bắt buộc cho ĐK 5 & 6).")
+                st.warning("⚠️ Chưa nạp file tham chiếu.")
+                st.download_button(
+                    "📥 Tải file mẫu (MAU_THAM_CHIEU.xlsx)",
+                    data=build_template_excel_bytes(),
+                    file_name="MAU_THAM_CHIEU.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
         else:
             st.info(
                 "👨‍⚕️ **Chế độ Bác sĩ / Khoa phòng**\n\n"
-                "Lọc khoa/tên mình, tích **Đã sửa** hoặc gõ **Ghi chú** — hệ thống tự động lưu về máy chủ."
+                "Lọc khoa/tên mình, tích **Đã sửa** hoặc gõ **Ghi chú** — hệ thống tự lưu về máy chủ."
             )
+
+        st.markdown("---")
+        is_cat = st.session_state.get("active_page") == PAGE_CATALOG
+        if st.button(
+            PAGE_CATALOG,
+            type="primary" if is_cat else "secondary",
+            use_container_width=True,
+            key="sidebar_btn_catalog",
+        ):
+            st.session_state["active_page"] = PAGE_CATALOG
+            st.rerun()
 
         st.markdown("---")
         role_label = "Quản trị" if admin else "Xem & Đánh dấu"
@@ -671,7 +687,7 @@ def build_sidebar(admin=True):
             unsafe_allow_html=True,
         )
 
-    return page, (ref_path if (ref_path and os.path.exists(ref_path)) else None)
+    return st.session_state["active_page"], (ref_path if (ref_path and os.path.exists(ref_path)) else None)
 
 
 # ======================= TRANG 1: SOI LỖI XML3 =======================
@@ -687,76 +703,14 @@ def page_scan(ref_path, admin=True):
             src_filename = saved.get('src_filename', '')
             used_ref = saved.get('used_ref', False)
 
-    has_result = result is not None
-
-    if admin:
-        exp_label = (
-            f"📤 Nạp hồ sơ mới / Quét lại (đang xem: {src_filename})"
-            if has_result and src_filename else
-            "📤 Nạp hồ sơ cần kiểm tra"
-        )
-        with st.expander(exp_label, expanded=not has_result):
-            if not ref_path:
-                st.info("💡 Chưa có file tham chiếu ở Sidebar — hệ thống sẽ chỉ chạy **ĐK 1 → ĐK 4** "
-                        "(bỏ qua ĐK 5 & ĐK 6).")
-
-            col_upload, col_action = st.columns([3.5, 1], gap="medium", vertical_alignment="center")
-            with col_upload:
-                input_file = st.file_uploader(
-                    "Kéo thả file Excel (.xlsx, .xls) hoặc XML (.xml)",
-                    type=["xlsx", "xls", "xml"],
-                    key="data_uploader",
-                    label_visibility="collapsed",
-                )
-            with col_action:
-                run_btn = st.button("🚀 Bắt đầu quét lỗi", type="primary", use_container_width=True)
-
-            if run_btn:
-                if input_file is None:
-                    st.warning("Vui lòng tải lên file dữ liệu trước khi quét.")
-                    st.stop()
-
-                progress = st.progress(0.0, text="Đang khởi động...")
-
-                def cb(pct, msg):
-                    progress.progress(min(max(int(pct * 100), 0), 100), text=msg)
-
-                try:
-                    df_raw = read_input_dataframe(input_file.getvalue(), input_file.name)
-                    catalogs = {}
-                    if ref_path:
-                        catalogs, _ = get_catalogs(ref_path)
-                    result = run_check(df_raw, catalogs=catalogs, ref_path=ref_path or "", progress_cb=cb)
-                except Exception as ex:
-                    progress.empty()
-                    st.error(f"❌ Lỗi xử lý: {ex}")
-                    st.stop()
-
-                progress.progress(100, text="Hoàn tất!")
-                progress.empty()
-
-                st.session_state['result'] = result
-                st.session_state['src_filename'] = input_file.name
-                st.session_state['used_ref'] = bool(ref_path)
-                st.session_state['th_page'] = 0
-                st.session_state['ct_page'] = 0
-                clear_cached_exports()
-                save_latest_result(result, input_file.name, bool(ref_path))
-                reset_th_notes()
-                st.toast(f"✅ Quét xong {input_file.name} ({result['stats']['total_errors']:,} lỗi)", icon="🎉")
-                st.rerun()
-
     if not result:
         msg = (
             "Chưa có dữ liệu kiểm tra. Vui lòng chờ quản trị viên cập nhật hồ sơ."
             if not admin else
-            "Chưa có kết quả. Hãy tải file ở trên và bấm <b>🚀 Bắt đầu quét lỗi</b>."
+            "Chưa có kết quả. Hãy nạp file Excel/XML ở cột bên trái và bấm <b>🚀 Quét lỗi &amp; Nạp Giường</b>."
         )
         st.markdown(f"<div class='card'><span class='soft-note'>{msg}</span></div>", unsafe_allow_html=True)
         return
-
-    if not admin and src_filename:
-        st.caption(f"📄 Đang xem kết quả mới nhất của file: **{src_filename}**")
 
     render_results(result, src_filename, used_ref)
 
@@ -774,7 +728,6 @@ SEARCH_COLS_CT = [
 
 
 def filter_th(df_th, selected_dk, selected_khoa, selected_status, selected_fix, query):
-    """Lọc nhanh theo cột chính xác trước, rồi mới chạy tìm kiếm không dấu."""
     df = df_th
     if selected_dk:
         df = df[df['Loại lỗi'].isin(selected_dk)]
@@ -824,214 +777,266 @@ def render_results(result, src_filename, used_ref):
         kpi_items.append((f"ĐK {i}", f"{stats['by_dk'][col]:,}", DK_COLORS[i]))
     render_kpi_row(kpi_items)
 
-    # ----- Thanh lọc full dữ liệu (2 hàng mảnh) -----
+    # ----- 1 HÀNG DUY NHẤT: 5 Ô LỌC + 1 NÚT ĐỒNG BỘ GỌN -----
     khoa_options = sorted(
         [k for k in df_out['Khoa'].dropna().astype(str).str.strip().unique() if k]
     ) if 'Khoa' in df_out.columns else []
 
-    r1_c1, r1_c2, r1_c3 = st.columns([2.8, 2.1, 2.1], gap="small")
-    with r1_c1:
+    fc1, fc2, fc3, fc4, fc5, fc6 = st.columns(FILTER_COL_WIDTHS, gap="small", vertical_alignment="center")
+    with fc1:
         query = st.text_input(
-            "🔎 Tìm kiếm nhanh",
-            placeholder="🔎 Tìm không dấu: Tên BN, Bác sĩ, Mã DV, Mã máy, Ghi chú...",
+            "Tìm kiếm",
+            placeholder="🔎 Tìm Tên BN, BS, Mã DV, Máy...",
             key="search_query",
             label_visibility="collapsed",
         )
-    with r1_c2:
+    with fc2:
         selected_khoa = st.multiselect(
-            "🏥 Lọc theo Khoa",
+            "Khoa",
             options=khoa_options,
             default=[],
-            placeholder="🏥 Lọc theo Khoa / Phòng khám...",
+            placeholder="🏥 Lọc Khoa...",
             key="khoa_filter",
             label_visibility="collapsed",
         )
-    with r1_c3:
+    with fc3:
         selected_dk = st.multiselect(
-            "🎯 Lọc điều kiện",
+            "Điều kiện",
             options=DK_COLUMNS,
             default=[],
-            placeholder="🎯 Lọc điều kiện (ĐK 1 → ĐK 6)...",
+            placeholder="🎯 Lọc ĐK 1→6...",
             key="dk_filter",
             label_visibility="collapsed",
         )
-
-    r2_c1, r2_c2, r2_c3 = st.columns([2.2, 2.2, 1.0], gap="small")
-    with r2_c1:
+    with fc4:
         selected_status = st.selectbox(
-            "📋 Trạng thái BN",
+            "Trạng thái",
             options=["Tất cả trạng thái", "Đang điều trị", "Ra viện"],
             key="status_filter",
             label_visibility="collapsed",
         )
-    with r2_c2:
+    with fc5:
         selected_fix = st.selectbox(
-            "✅ Tình trạng sửa",
-            options=["Tất cả (Đã sửa & Chưa sửa)", "Chưa sửa", "Đã sửa"],
+            "Tình trạng sửa",
+            options=["Tất cả (Đã/Chưa sửa)", "Chưa sửa", "Đã sửa"],
             key="fix_filter",
             label_visibility="collapsed",
         )
-    with r2_c3:
-        if st.button("🔄 Đồng bộ", use_container_width=True, help="Tải lại trạng thái Đã sửa / Ghi chú mới nhất"):
+    with fc6:
+        if st.button("🔄", use_container_width=True, help="Đồng bộ trạng thái Đã sửa / Ghi chú mới nhất"):
             clear_cached_exports()
             st.rerun()
 
-    tab_th, tab_ct = st.tabs(["📋 Tổng hợp lỗi (TH)", "📑 Dữ liệu chi tiết (chitiet)"])
+    # ----- Xác định tab đang chọn & tính dữ liệu lọc -----
+    if "scan_subtab" not in st.session_state:
+        st.session_state["scan_subtab"] = "th"
+    cur_sub = st.session_state["scan_subtab"]
 
-    with tab_th:
-        df_th_view = filter_th(df_th_with_notes, selected_dk, selected_khoa, selected_status, selected_fix, query)
-        done_count = int(df_th_with_notes["Đã sửa"].sum()) if not df_th_with_notes.empty else 0
+    df_th_view = filter_th(df_th_with_notes, selected_dk, selected_khoa, selected_status, selected_fix, query)
+    only_errors = st.session_state.get("only_errors", True)
+    df_ct_view = filter_chitiet(df_out, selected_dk, selected_khoa, selected_status, query, only_errors)
 
-        extra_info = (
-            f"• ✅ Đã sửa: <b>{done_count:,}</b>/{len(df_th_with_notes):,} "
-            f"<i>(Tích Đã sửa / gõ Ghi chú tự lưu máy chủ)</i>"
+    # Xóa cache Excel lọc nếu bộ lọc thay đổi
+    filter_sig = (tuple(selected_dk), tuple(selected_khoa), selected_status, selected_fix, query, only_errors)
+    if st.session_state.get('_excel_filtered_sig') != filter_sig:
+        st.session_state.pop('_excel_filtered_bytes', None)
+        st.session_state['_excel_filtered_sig'] = filter_sig
+
+    # Tính phân trang cho tab đang chọn
+    active_df = df_th_view if cur_sub == "th" else df_ct_view
+    page_key = "th_page" if cur_sub == "th" else "ct_page"
+    size_key = "th_pgsz" if cur_sub == "th" else "ct_pgsz"
+    size_options = [100, 200, 500, OPT_ALL_ROWS]
+    if size_key not in st.session_state or st.session_state[size_key] not in size_options:
+        st.session_state[size_key] = 100
+    if page_key not in st.session_state:
+        st.session_state[page_key] = 0
+
+    total_rows = len(active_df)
+    selected_sz = st.session_state[size_key]
+    if selected_sz == OPT_ALL_ROWS:
+        page_size = max(1, min(total_rows, MAX_ALL_ROWS))
+    else:
+        page_size = int(selected_sz)
+
+    n_pages = max(1, (total_rows + page_size - 1) // page_size)
+    page = min(max(0, int(st.session_state[page_key])), n_pages - 1)
+    st.session_state[page_key] = page
+    start = page * page_size
+    end = min(start + page_size, total_rows)
+    range_txt = f"{start + 1:,}–{end:,}" if total_rows > 0 else "0"
+
+    done_count = int(df_th_with_notes["Đã sửa"].sum()) if not df_th_with_notes.empty else 0
+    full_name = make_output_filename(src_filename)
+
+    # ----- THANH CÔNG CỤ TẤT CẢ TRONG 1 HÀNG: [TH | Chi tiết] + [Hiển thị...] + [Phân trang] + [Excel Full | Lọc] -----
+    tb_th, tb_ct, tb_info, tb_sz, tb_nav, tb_ex_full, tb_ex_flt = st.columns(
+        [1.05, 0.95, 2.65, 0.80, 1.50, 0.70, 0.70],
+        gap="small",
+        vertical_alignment="center",
+    )
+
+    with tb_th:
+        if st.button(
+            "📋 Tổng hợp (TH)",
+            type="primary" if cur_sub == "th" else "secondary",
+            use_container_width=True,
+            key="subtab_btn_th",
+        ):
+            st.session_state["scan_subtab"] = "th"
+            st.rerun()
+
+    with tb_ct:
+        if st.button(
+            "📑 Chi tiết",
+            type="primary" if cur_sub == "ct" else "secondary",
+            use_container_width=True,
+            key="subtab_btn_ct",
+        ):
+            st.session_state["scan_subtab"] = "ct"
+            st.rerun()
+
+    with tb_info:
+        if cur_sub == "th":
+            st.markdown(
+                f"<div class='soft-note'>Hiển thị <b>{range_txt}</b>/{total_rows:,} • "
+                f"✅ Đã sửa: <b>{done_count:,}</b>/{len(df_th_with_notes):,}</div>",
+                unsafe_allow_html=True,
+            )
+        else:
+            c_i1, c_i2 = st.columns([1.2, 1.1], vertical_alignment="center")
+            with c_i1:
+                st.markdown(
+                    f"<div class='soft-note'><b>{range_txt}</b>/{total_rows:,} (gốc {len(df_out):,})</div>",
+                    unsafe_allow_html=True,
+                )
+            with c_i2:
+                st.checkbox("Chỉ dòng lỗi", value=only_errors, key="only_errors")
+
+    with tb_sz:
+        st.selectbox("Dòng/trang", options=size_options, key=size_key, label_visibility="collapsed")
+
+    with tb_nav:
+        n1, n2, n3, n4, n5 = st.columns([0.55, 0.55, 1.1, 0.55, 0.55], vertical_alignment="center")
+        if n1.button("«", key=f"{page_key}_first", disabled=(page <= 0), use_container_width=True):
+            st.session_state[page_key] = 0
+            st.rerun()
+        if n2.button("‹", key=f"{page_key}_prev", disabled=(page <= 0), use_container_width=True):
+            st.session_state[page_key] = page - 1
+            st.rerun()
+        n3.markdown(
+            f"<div style='text-align:center;font-size:12px;font-weight:600;color:#334155;'>{page + 1}/{n_pages}</div>",
+            unsafe_allow_html=True,
         )
-        start, end, th_page, th_pgsz = render_pagination_bar(
-            len(df_th_view), "th_page", "th_pgsz", info_html=extra_info
-        )
+        if n4.button("›", key=f"{page_key}_next", disabled=(page >= n_pages - 1), use_container_width=True):
+            st.session_state[page_key] = page + 1
+            st.rerun()
+        if n5.button("»", key=f"{page_key}_last", disabled=(page >= n_pages - 1), use_container_width=True):
+            st.session_state[page_key] = n_pages - 1
+            st.rerun()
 
+    with tb_ex_full:
+        if st.session_state.get('_excel_full_bytes'):
+            st.download_button(
+                "⬇️ Full",
+                data=st.session_state['_excel_full_bytes'],
+                file_name=full_name,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                help="Bấm để tải Excel đầy đủ (TH + chitiet)",
+            )
+        else:
+            if st.button("📥 Full", use_container_width=True, help="Tạo file Excel đầy đủ (TH + chitiet)"):
+                with st.spinner("Đang tạo Excel Full..."):
+                    latest_th = attach_notes_to_th(result['df_th'])
+                    st.session_state['_excel_full_bytes'] = build_output_excel_bytes(
+                        format_th_for_export(latest_th), df_out
+                    )
+                st.rerun()
+
+    with tb_ex_flt:
+        if st.session_state.get('_excel_filtered_bytes'):
+            st.download_button(
+                "⬇️ Lọc",
+                data=st.session_state['_excel_filtered_bytes'],
+                file_name=full_name.replace(".xlsx", "_Loc.xlsx"),
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                help="Bấm để tải Excel theo bộ lọc hiện tại",
+            )
+        else:
+            if st.button("📥 Lọc", use_container_width=True, help="Tạo file Excel theo bộ lọc hiện tại"):
+                with st.spinner("Đang tạo Excel Lọc..."):
+                    latest_th = attach_notes_to_th(result['df_th'])
+                    th_flt = filter_th(latest_th, selected_dk, selected_khoa, selected_status, selected_fix, query)
+                    ct_flt = filter_chitiet(df_out, selected_dk, selected_khoa, selected_status, query, only_errors)
+                    buf = BytesIO()
+                    with pd.ExcelWriter(buf, engine='openpyxl') as writer:
+                        format_th_for_export(th_flt).to_excel(writer, sheet_name='TH', index=False)
+                        ct_flt.to_excel(writer, sheet_name='chitiet', index=False)
+                    buf.seek(0)
+                    st.session_state['_excel_filtered_bytes'] = buf.getvalue()
+                st.rerun()
+
+    # ----- BẢNG DỮ LIỆU CHÍNH -----
+    if cur_sub == "th":
         if df_th_view.empty:
             st.info("Không có dòng nào khớp bộ lọc hiện tại.")
         else:
             page_before = df_th_view.iloc[start:end].copy()
             page_after = render_excel_table(
                 page_before,
-                key=f"grid_th_{th_page}_{th_pgsz}",
-                height=620,
+                key=f"grid_th_{page}_{page_size}",
+                height=820,
                 editable_cols=["Đã sửa", "Ghi chú"],
             )
             if sync_edited_notes(page_before, page_after):
                 st.toast("✅ Đã lưu trạng thái & ghi chú lên máy chủ!", icon="💾")
-                df_th_with_notes = attach_notes_to_th(result['df_th'])
-                df_th_view = filter_th(df_th_with_notes, selected_dk, selected_khoa, selected_status, selected_fix, query)
-
-    with tab_ct:
-        only_errors = st.checkbox("Chỉ hiện các dòng có lỗi", value=True, key="only_errors")
-        df_ct_view = filter_chitiet(df_out, selected_dk, selected_khoa, selected_status, query, only_errors)
-
-        ct_start, ct_end, _, _ = render_pagination_bar(
-            len(df_ct_view), "ct_page", "ct_pgsz",
-            info_html=f"(tổng gốc: {len(df_out):,})"
-        )
-
+    else:
         if df_ct_view.empty:
             st.info("Không có dòng nào khớp bộ lọc hiện tại.")
         else:
-            st.dataframe(
-                df_ct_view.iloc[ct_start:ct_end],
-                use_container_width=True,
-                hide_index=True,
-                height=620,
-            )
-
-    # ----- Tải kết quả (Chỉ sinh file Excel khi bấm nút — không lag 40k dòng) -----
-    st.markdown("---")
-    d1, d2 = st.columns(2, gap="large")
-    full_name = make_output_filename(src_filename)
-
-    with d1:
-        if st.button("📦 Tạo file Excel đầy đủ (TH + chitiet)", type="primary", use_container_width=True):
-            with st.spinner("Đang tạo file Excel đầy đủ..."):
-                latest_th = attach_notes_to_th(result['df_th'])
-                st.session_state['_excel_full_bytes'] = build_output_excel_bytes(
-                    format_th_for_export(latest_th), df_out
-                )
-        if st.session_state.get('_excel_full_bytes'):
-            st.download_button(
-                "⬇️ Tải xuống Excel đầy đủ",
-                data=st.session_state['_excel_full_bytes'],
-                file_name=full_name,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-            )
-
-    with d2:
-        if st.button("📦 Tạo file Excel danh sách đang lọc", use_container_width=True):
-            with st.spinner("Đang tạo file Excel theo bộ lọc hiện tại..."):
-                latest_th = attach_notes_to_th(result['df_th'])
-                th_filtered_full = filter_th(
-                    latest_th, selected_dk, selected_khoa, selected_status, selected_fix, query
-                )
-                ct_filtered_full = filter_chitiet(
-                    df_out, selected_dk, selected_khoa, selected_status, query,
-                    st.session_state.get("only_errors", True)
-                )
-                buf = BytesIO()
-                with pd.ExcelWriter(buf, engine='openpyxl') as writer:
-                    format_th_for_export(th_filtered_full).to_excel(writer, sheet_name='TH', index=False)
-                    ct_filtered_full.to_excel(writer, sheet_name='chitiet', index=False)
-                buf.seek(0)
-                st.session_state['_excel_filtered_bytes'] = buf.getvalue()
-        if st.session_state.get('_excel_filtered_bytes'):
-            st.download_button(
-                "⬇️ Tải xuống Excel đang lọc",
-                data=st.session_state['_excel_filtered_bytes'],
-                file_name=full_name.replace(".xlsx", "_Loc.xlsx"),
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-            )
+            st.dataframe(df_ct_view.iloc[start:end], use_container_width=True, hide_index=True, height=660)
 
     if not used_ref:
         st.info("ℹ️ Lần quét này chưa dùng file tham chiếu — ĐK 5 & ĐK 6 (phần cấu hình) chưa được kiểm tra đầy đủ.")
 
 
-# ======================= TRANG 2: QUẢN LÝ DANH MỤC CỔNG =======================
+# ======================= TRANG QUẢN LÝ DANH MỤC CỔNG =======================
 def page_catalog(ref_path, admin=True):
     st.markdown("<div class='section-title'>📂 Quản lý Danh mục Cổng BHYT</div>", unsafe_allow_html=True)
-    st.markdown(
-        "<div class='soft-note'>Xem nhanh dữ liệu 3 sheet danh mục đang dùng: "
-        "<b>data_nvyt</b> (nhân viên y tế), <b>data_tbyt</b> (trang thiết bị), <b>data_dvkt</b> (dịch vụ kỹ thuật).</div>",
-        unsafe_allow_html=True,
-    )
 
     if not ref_path:
-        if admin:
-            st.warning("⚠️ Chưa có file tham chiếu. Hãy tải lên ở Sidebar (mục **Cấu hình dữ liệu Cổng BHYT**).")
-        else:
-            st.warning("⚠️ Chưa có dữ liệu danh mục tham chiếu. Vui lòng chờ quản trị viên cập nhật.")
-        st.markdown("---")
-        st.markdown("<div class='section-title'>🧩 Module mở rộng (sắp ra mắt)</div>", unsafe_allow_html=True)
-        with st.expander("🛏️ Kiểm tra giường bệnh / nằm ghép / giường trống theo khoa"):
-            st.caption("Module đang được phát triển — sẽ dùng chung thư mục `data_ref/`.")
-        with st.expander("🏥 Quản lý danh mục Giường / Khoa phòng / DVKT"):
-            st.caption("Module đang được phát triển — sẽ dùng chung thư mục `data_ref/`.")
+        msg = (
+            "⚠️ Chưa có file tham chiếu. Hãy tải lên ở cột bên trái (mục **2. Danh mục đối chiếu**)."
+            if admin else
+            "⚠️ Chưa có dữ liệu danh mục tham chiếu. Vui lòng chờ quản trị viên cập nhật."
+        )
+        st.warning(msg)
         return
 
     st.success(f"✅ File đang dùng: **{os.path.basename(ref_path)}**")
-    catalogs, frames = get_catalogs(ref_path)
+    visible_sheets = get_visible_sheets(ref_path)
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Bác sĩ (data_nvyt)", f"{len(catalogs['dict_ten_bs']):,}")
-    c2.metric("Thiết bị (data_tbyt)", f"{len(catalogs['dict_may']):,}")
-    c3.metric("DVKT (data_dvkt)", f"{len(catalogs['dict_dvkt_hieuluc']):,}")
+    if not visible_sheets:
+        st.info("Không tìm thấy sheet nào đang hiển thị trong file tham chiếu.")
+        return
 
-    st.markdown("---")
+    sheet_names = list(visible_sheets.keys())
+    kpi_items = [(name, f"{len(df_s):,}", COLOR_MAIN) for name, df_s in visible_sheets.items()]
+    render_kpi_row(kpi_items[:6])
 
-    tabs = st.tabs(["👨‍⚕️ data_nvyt", "🩻 data_tbyt", "🧾 data_dvkt"])
-    sheet_map = [
-        ('data_nvyt', ['MACCHN', 'HO_TEN', 'Mã CK', 'Tên Công khám']),
-        ('data_tbyt', ['MA_MAY', 'TEN_TB', 'KY_HIEU', 'CONGTY_SX']),
-        ('data_dvkt', ['MA', 'TEN', 'HIEU_LUC', 'LY_DO_TU_CHOI']),
-    ]
-    for tab, (sheet_name, cols) in zip(tabs, sheet_map):
+    tabs = st.tabs([f"📄 {name}" for name in sheet_names])
+    for tab, name in zip(tabs, sheet_names):
         with tab:
-            df_sheet = frames.get(sheet_name)
+            df_sheet = visible_sheets[name]
             if df_sheet is None or df_sheet.empty:
-                st.info(f"Sheet **{sheet_name}** chưa có dữ liệu.")
+                st.info(f"Sheet **{name}** chưa có dữ liệu.")
                 continue
-            kw = st.text_input(f"🔎 Tìm trong {sheet_name}", key=f"cat_search_{sheet_name}")
-            view = df_sheet
-            if kw:
-                view = match_query(df_sheet, kw, list(df_sheet.columns))
-            st.caption(f"{len(view):,} / {len(df_sheet):,} dòng")
-            st.dataframe(view, use_container_width=True, hide_index=True, height=460)
-
-    st.markdown("---")
-    st.markdown("<div class='section-title'>🧩 Module mở rộng (sắp ra mắt)</div>", unsafe_allow_html=True)
-    with st.expander("🛏️ Kiểm tra giường bệnh / nằm ghép / giường trống theo khoa"):
-        st.caption("Module đang được phát triển — sẽ dùng chung thư mục `data_ref/`.")
-    with st.expander("🏥 Quản lý danh mục Giường / Khoa phòng / DVKT"):
-        st.caption("Module đang được phát triển — sẽ dùng chung thư mục `data_ref/`.")
+            kw = st.text_input(f"🔎 Tìm trong {name}", key=f"cat_search_{name}")
+            view = match_query(df_sheet, kw, list(df_sheet.columns)) if kw else df_sheet
+            st.caption(f"Hiển thị **{len(view):,}** / **{len(df_sheet):,}** dòng")
+            st.dataframe(view, use_container_width=True, hide_index=True, height=520)
 
 
 # ======================= MAIN =======================
@@ -1041,11 +1046,12 @@ def main():
     admin = is_admin()
     page, ref_path = build_sidebar(admin=admin)
     render_header()
+    render_top_channel_switcher()
 
     if page == PAGE_SCAN:
         page_scan(ref_path, admin=admin)
     elif page == PAGE_BED:
-        page_bed_management(ref_path, admin=admin, render_kpi_fn=render_kpi_row)
+        page_bed_management(ref_path, admin=admin, render_kpi_fn=render_kpi_row, show_uploader=False)
     else:
         page_catalog(ref_path, admin=admin)
 
