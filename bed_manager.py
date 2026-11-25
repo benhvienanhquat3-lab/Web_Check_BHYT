@@ -4,11 +4,11 @@ bed_manager.py
 =======================================================================
 Module độc lập: Sơ đồ & Kiểm tra trùng Giường bệnh nội trú (MA_NHOM = 15)
 - Tách độc lập hoàn toàn THEO TỪNG NGÀY MỘT (không gộp đè giữa các ngày).
-- Đọc danh mục chi tiết từ sheet `dm_giuong_chitiet` (fallback `data_giuong`).
-- Hiển thị Số BN thực tế / Số giường phê duyệt (vd: 22/20).
-- Ghi rõ loại trùng (trùng Nam-Nữ / trùng TG) ngay trên thanh ngày.
-- Cảnh báo đỏ rực nếu khoa có trùng giường nhưng Số BN < Số giường phê duyệt.
-- Nhấn vào giường có người bật Popup hiện đại (@st.dialog) xem hồ sơ BN.
+- Chỉ dùng mã giường thật (MA_GIUONG_CV130 / MA_GIUONG); BN trống mã giường
+  tách ra bảng phụ riêng, tuyệt đối không tự gán tạm gây trùng ảo.
+- BN trống cả NGAY_KQ và NGAY_RA: rải từ ngày bắt đầu đến 23:59 ngày lớn nhất
+  của cột NGAY_KQ trong file.
+- BN có NGAY_RA nhưng trống NGAY_KQ: tách cảnh báo bảng phụ riêng theo ngày.
 =======================================================================
 """
 
@@ -61,7 +61,6 @@ def _calc_age_str(nam_sinh):
 
 
 def _short_dept_name(ma_khoa, ten_khoa):
-    """Rút gọn tên khoa để hiển thị gọn đẹp trên 1 dòng tổng hợp."""
     mapping = {
         "K282930": "LCK",
         "K1631": "YHCT",
@@ -246,26 +245,60 @@ def extract_bed_records(df_raw):
 
     df["TYLE_TT_NUM"] = pd.to_numeric(df["TYLE_TT"], errors="coerce").fillna(100)
 
-    starts, ends = [], []
-    now_dt = datetime.now()
+    # 1. Tìm mốc ngày kết quả lớn nhất của toàn bộ file (để rải cho BN đang điều trị)
+    parsed_kq = [parse_bhyt_datetime(v, is_end=True) for v in df["NGAY_KQ"]]
+    valid_kq = [d for d in parsed_kq if d is not None]
+
+    parsed_starts = []
     for _, r in df.iterrows():
         st_dt = (
             parse_bhyt_datetime(r["NGAY_TH_YL"], is_end=False)
             or parse_bhyt_datetime(r["NGAY_YL"], is_end=False)
             or parse_bhyt_datetime(r["NGAY_VAO"], is_end=False)
         )
-        en_dt = (
-            parse_bhyt_datetime(r["NGAY_KQ"], is_end=True)
-            or parse_bhyt_datetime(r["NGAY_RA"], is_end=True)
-            or now_dt
-        )
+        parsed_starts.append(st_dt)
+
+    if valid_kq:
+        max_kq_date = max(valid_kq).date()
+        fallback_end_dt = datetime.combine(max_kq_date, dt_time(23, 59))
+    else:
+        valid_st = [d for d in parsed_starts if d is not None]
+        max_st_date = max(valid_st).date() if valid_st else date.today()
+        fallback_end_dt = datetime.combine(max_st_date, dt_time(23, 59))
+
+    # 2. Xác định START_DT, END_DT và các cờ cảnh báo
+    ends = []
+    missing_kq_has_ra_flags = []
+    is_est_end_flags = []
+
+    for idx_i, (_, r) in enumerate(df.iterrows()):
+        st_dt = parsed_starts[idx_i]
+        kq_dt = parsed_kq[idx_i]
+        ra_dt = parse_bhyt_datetime(r["NGAY_RA"], is_end=True)
+
+        if kq_dt is not None:
+            en_dt = kq_dt
+            missing_kq_has_ra_flags.append(False)
+            is_est_end_flags.append(False)
+        elif ra_dt is not None:
+            # Có NGAY_RA nhưng trống NGAY_KQ -> lấy NGAY_RA làm mốc kết thúc & bật cảnh báo riêng
+            en_dt = ra_dt
+            missing_kq_has_ra_flags.append(True)
+            is_est_end_flags.append(False)
+        else:
+            # Trống cả NGAY_KQ và NGAY_RA -> rải đến 23:59 ngày MAX_NGAY_KQ
+            en_dt = fallback_end_dt
+            missing_kq_has_ra_flags.append(False)
+            is_est_end_flags.append(True)
+
         if st_dt and en_dt and en_dt < st_dt:
             en_dt = st_dt
-        starts.append(st_dt)
         ends.append(en_dt)
 
-    df["START_DT"] = starts
+    df["START_DT"] = parsed_starts
     df["END_DT"] = ends
+    df["MISSING_KQ_HAS_RA"] = missing_kq_has_ra_flags
+    df["IS_ESTIMATED_END"] = is_est_end_flags
     df = df[df["START_DT"].notna()].copy()
     return df.reset_index(drop=True)
 
@@ -288,10 +321,12 @@ def _is_mixed_gender(g1, g2):
 
 
 def build_bed_map_for_day(bed_catalog, df_day, day_start, day_end, day_str=""):
-    """Tính sơ đồ giường & trùng giờ độc lập cho ĐÚNG 1 NGÀY."""
+    """Tính sơ đồ giường, trùng giờ, BN chưa gán giường & BN có ngày ra trống ngày KQ cho ĐÚNG 1 NGÀY."""
     dept_results = []
     detail_rows = []
     overlap_rows = []
+    unassigned_rows = []
+    missing_kq_rows = []
 
     for dept in bed_catalog:
         ma_khoa = dept["MA_KHOA"]
@@ -307,6 +342,9 @@ def build_bed_map_for_day(bed_catalog, df_day, day_start, day_end, day_str=""):
             sub = sub.sort_values(by=["START_DT", "MA_LK"], ascending=True)
 
             for _, row in sub.iterrows():
+                is_missing_kq_ra = bool(row.get("MISSING_KQ_HAS_RA", False))
+                is_est_end = bool(row.get("IS_ESTIMATED_END", False))
+
                 rec = {
                     "MA_LK": row["MA_LK"],
                     "TENBENHNHAN": row["TENBENHNHAN"] or f"BN {row['MA_LK']}",
@@ -319,6 +357,8 @@ def build_bed_map_for_day(bed_catalog, df_day, day_start, day_end, day_str=""):
                     "START_DT": row["START_DT"],
                     "END_DT": row["END_DT"],
                     "TRANG_THAI_BN": "Ra viện" if row["NGAY_RA"] else "Đang điều trị",
+                    "MISSING_KQ_HAS_RA": is_missing_kq_ra,
+                    "IS_ESTIMATED_END": is_est_end,
                 }
                 dept_unique_patients.add(rec["MA_LK"] or rec["TENBENHNHAN"])
 
@@ -331,31 +371,35 @@ def build_bed_map_for_day(bed_catalog, df_day, day_start, day_end, day_str=""):
                     assigned_code = real_code
                     source_tag = "MA_GIUONG_CV130"
                 else:
-                    assigned_code = None
-                    for code in bed_codes:
-                        if any(x["MA_LK"] == rec["MA_LK"] and rec["MA_LK"] for x in beds[code]):
-                            assigned_code = code
-                            break
-                    if assigned_code is None:
-                        for code in bed_codes:
-                            has_ov = any(
-                                _get_overlap_window(rec["START_DT"], rec["END_DT"], x["START_DT"], x["END_DT"], day_start, day_end)
-                                for x in beds[code]
-                            )
-                            if not has_ov:
-                                assigned_code = code
-                                break
-                    if assigned_code is None and bed_codes:
-                        assigned_code = min(
-                            bed_codes,
-                            key=lambda c: sum(
-                                1 for x in beds[c]
-                                if _get_overlap_window(rec["START_DT"], rec["END_DT"], x["START_DT"], x["END_DT"], day_start, day_end)
-                            ),
-                        )
-                    if assigned_code:
-                        beds[assigned_code].append(rec)
-                    source_tag = "Gán tạm"
+                    # TUYỆT ĐỐI KHÔNG GÁN TẠM -> Đưa vào bảng phụ Chưa gán mã giường
+                    assigned_code = ""
+                    source_tag = "Chưa gán"
+                    unassigned_rows.append({
+                        "Ngày": day_str,
+                        "Mã khoa": ma_khoa,
+                        "Tên khoa": ten_khoa,
+                        "Mã LK": rec["MA_LK"],
+                        "Tên bệnh nhân": rec["TENBENHNHAN"],
+                        "Giới tính": rec["GIOI_TINH"],
+                        "Trạng thái BN": rec["TRANG_THAI_BN"],
+                        "Tên dịch vụ giường": rec["TEN_DICH_VU"],
+                        "Từ thời điểm": rec["START_DT"].strftime("%d/%m/%Y %H:%M"),
+                        "Đến thời điểm": rec["END_DT"].strftime("%d/%m/%Y %H:%M") + (" (tạm tính)" if is_est_end else ""),
+                    })
+
+                if is_missing_kq_ra:
+                    missing_kq_rows.append({
+                        "Ngày": day_str,
+                        "Mã khoa": ma_khoa,
+                        "Tên khoa": ten_khoa,
+                        "Mã giường": assigned_code or "(Chưa gán)",
+                        "Mã LK": rec["MA_LK"],
+                        "Tên bệnh nhân": rec["TENBENHNHAN"],
+                        "Giới tính": rec["GIOI_TINH"],
+                        "Ngày bắt đầu": rec["START_DT"].strftime("%d/%m/%Y %H:%M"),
+                        "Ngày ra viện (NGAY_RA)": rec["END_DT"].strftime("%d/%m/%Y %H:%M"),
+                        "Cảnh báo": "Đã có Ngày ra nhưng trống NGAY_KQ",
+                    })
 
                 meta = bed_meta.get(assigned_code, {})
                 detail_rows.append({
@@ -363,7 +407,7 @@ def build_bed_map_for_day(bed_catalog, df_day, day_start, day_end, day_str=""):
                     "Mã khoa": ma_khoa,
                     "Tên khoa": ten_khoa,
                     "Phòng": meta.get("phong", ""),
-                    "Mã giường": assigned_code or "",
+                    "Mã giường": assigned_code or "(Chưa gán)",
                     "Nguồn mã": source_tag,
                     "Mã LK": rec["MA_LK"],
                     "Tên bệnh nhân": rec["TENBENHNHAN"],
@@ -372,7 +416,7 @@ def build_bed_map_for_day(bed_catalog, df_day, day_start, day_end, day_str=""):
                     "Tên dịch vụ giường": rec["TEN_DICH_VU"],
                     "Tỷ lệ TT (%)": int(rec["TYLE_TT"]),
                     "Từ thời điểm": rec["START_DT"].strftime("%d/%m/%Y %H:%M"),
-                    "Đến thời điểm": rec["END_DT"].strftime("%d/%m/%Y %H:%M"),
+                    "Đến thời điểm": rec["END_DT"].strftime("%d/%m/%Y %H:%M") + (" (tạm tính)" if is_est_end else ""),
                 })
 
         bed_cards = []
@@ -471,15 +515,25 @@ def build_bed_map_for_day(bed_catalog, df_day, day_start, day_end, day_str=""):
         df_ov["_prio"] = df_ov["Cảnh báo"].apply(lambda x: 0 if "NAM - NỮ" in str(x) else 1)
         df_ov = df_ov.sort_values(by=["_prio", "Mã khoa", "Mã giường"]).drop(columns=["_prio"]).reset_index(drop=True)
 
-    return dept_results, pd.DataFrame(detail_rows), df_ov
+    return (
+        dept_results,
+        pd.DataFrame(detail_rows),
+        df_ov,
+        pd.DataFrame(unassigned_rows),
+        pd.DataFrame(missing_kq_rows),
+    )
 
 
-def _build_excel_bytes(df_summary, df_overlap, df_detail):
+def _build_excel_bytes(df_summary, df_overlap, df_detail, df_unassigned=None, df_missing_kq=None):
     buf = BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as writer:
         df_summary.to_excel(writer, sheet_name="TongHop_TheoNgay", index=False)
         df_overlap.to_excel(writer, sheet_name="Trung_Giuong", index=False)
         df_detail.to_excel(writer, sheet_name="ChiTiet_Giuong", index=False)
+        if df_unassigned is not None and not df_unassigned.empty:
+            df_unassigned.to_excel(writer, sheet_name="Chua_Gan_Giuong", index=False)
+        if df_missing_kq is not None and not df_missing_kq.empty:
+            df_missing_kq.to_excel(writer, sheet_name="CoNgayRa_TrongKQ", index=False)
     buf.seek(0)
     return buf.getvalue()
 
@@ -517,6 +571,10 @@ def _show_bed_modal(dept, bed, day_str=""):
         gt_tuoi = ", ".join(g_parts) if g_parts else "Chưa rõ"
         start_s = p["START_DT"].strftime("%d/%m/%Y %H:%M")
         end_s = p["END_DT"].strftime("%d/%m/%Y %H:%M")
+        if p.get("IS_ESTIMATED_END"):
+            end_s += " (tạm tính)"
+        elif p.get("MISSING_KQ_HAS_RA"):
+            end_s += " (theo NGAY_RA, trống KQ)"
         dv_txt = p.get("TEN_DICH_VU") or "Giường nội trú"
         ma_benh_txt = f" • Mã bệnh: <b>{html.escape(p['MA_BENH'])}</b>" if p.get("MA_BENH") else ""
 
@@ -739,6 +797,12 @@ def page_bed_management(ref_path, admin=True, render_kpi_fn=None, show_uploader=
     src_name = saved.get("src_filename", "") if saved else ""
     updated_at = saved.get("updated_at", "") if saved else ""
 
+    if not df_bed_all.empty:
+        if "MISSING_KQ_HAS_RA" not in df_bed_all.columns:
+            df_bed_all["MISSING_KQ_HAS_RA"] = False
+        if "IS_ESTIMATED_END" not in df_bed_all.columns:
+            df_bed_all["IS_ESTIMATED_END"] = False
+
     if admin and show_uploader:
         exp_title = (
             f"📤 Nạp báo cáo giường mới (đang dùng: {src_name} • cập nhật {updated_at})"
@@ -862,7 +926,10 @@ def page_bed_management(ref_path, admin=True, render_kpi_fn=None, show_uploader=
         mask_time = (df_bed_all["START_DT"] <= range_end) & (df_bed_all["END_DT"] >= range_start)
         df_filtered = df_bed_all[mask_time].copy()
     else:
-        df_filtered = pd.DataFrame(columns=["MA_KHOA", "MA_LK", "TENBENHNHAN", "GIOI_TINH_STD", "MA_GIUONG_STD", "START_DT", "END_DT"])
+        df_filtered = pd.DataFrame(columns=[
+            "MA_KHOA", "MA_LK", "TENBENHNHAN", "GIOI_TINH_STD",
+            "MA_GIUONG_STD", "START_DT", "END_DT", "MISSING_KQ_HAS_RA", "IS_ESTIMATED_END",
+        ])
 
     if sel_khoa:
         chosen_codes = [s.split("(")[-1].rstrip(")") for s in sel_khoa]
@@ -874,6 +941,8 @@ def page_bed_management(ref_path, admin=True, render_kpi_fn=None, show_uploader=
     daily_packs = []
     all_ov_frames = []
     all_detail_frames = []
+    all_unassigned_frames = []
+    all_missing_kq_frames = []
     all_summary_rows = []
 
     for offset in range(total_days):
@@ -887,7 +956,9 @@ def page_bed_management(ref_path, admin=True, render_kpi_fn=None, show_uploader=
         else:
             df_day = df_filtered
 
-        day_depts, day_detail, day_ov = build_bed_map_for_day(cat_view, df_day, d_start, d_end, day_str=date_str)
+        day_depts, day_detail, day_ov, day_unassigned, day_missing_kq = build_bed_map_for_day(
+            cat_view, df_day, d_start, d_end, day_str=date_str
+        )
         day_n_ov = len(day_ov)
         day_n_mixed = int(day_ov["Cảnh báo"].str.contains("NAM - NỮ", na=False).sum()) if not day_ov.empty else 0
 
@@ -897,6 +968,8 @@ def page_bed_management(ref_path, admin=True, render_kpi_fn=None, show_uploader=
             "depts": day_depts,
             "detail": day_detail,
             "ov": day_ov,
+            "unassigned": day_unassigned,
+            "missing_kq": day_missing_kq,
             "n_ov": day_n_ov,
             "n_mixed": day_n_mixed,
             "n_time_only": day_n_ov - day_n_mixed,
@@ -906,6 +979,10 @@ def page_bed_management(ref_path, admin=True, render_kpi_fn=None, show_uploader=
             all_ov_frames.append(day_ov)
         if not day_detail.empty:
             all_detail_frames.append(day_detail)
+        if not day_unassigned.empty:
+            all_unassigned_frames.append(day_unassigned)
+        if not day_missing_kq.empty:
+            all_missing_kq_frames.append(day_missing_kq)
         for d in day_depts:
             tot_pd = d["total_approved"]
             bn_tt = d["actual_patients"]
@@ -923,6 +1000,8 @@ def page_bed_management(ref_path, admin=True, render_kpi_fn=None, show_uploader=
 
     df_all_ov = pd.concat(all_ov_frames, ignore_index=True) if all_ov_frames else pd.DataFrame()
     df_all_detail = pd.concat(all_detail_frames, ignore_index=True) if all_detail_frames else pd.DataFrame()
+    df_all_unassigned = pd.concat(all_unassigned_frames, ignore_index=True) if all_unassigned_frames else pd.DataFrame()
+    df_all_missing_kq = pd.concat(all_missing_kq_frames, ignore_index=True) if all_missing_kq_frames else pd.DataFrame()
     df_all_summary = pd.DataFrame(all_summary_rows)
 
     total_beds_catalog = sum(len(d["BEDS"]) for d in cat_view)
@@ -975,6 +1054,8 @@ def page_bed_management(ref_path, admin=True, render_kpi_fn=None, show_uploader=
             day_depts = pack["depts"]
             day_ov = pack["ov"]
             day_detail = pack["detail"]
+            day_unassigned = pack["unassigned"]
+            day_missing_kq = pack["missing_kq"]
 
             day_actual_bn = sum(d["actual_patients"] for d in day_depts)
             day_total_pd = sum(d["total_approved"] for d in day_depts)
@@ -999,7 +1080,6 @@ def page_bed_management(ref_path, admin=True, render_kpi_fn=None, show_uploader=
                 if d_ov > 0:
                     ov_desc = _format_overlap_desc(d_mixed, d_time)
                     if d_bn < d_tot:
-                        # CÒN GIƯỜNG TRỐNG NHƯNG VẪN TRÙNG -> CẢNH BÁO ĐỎ LÒM
                         has_weird_overlap_day = True
                         dept_chips.append(
                             f":red-background[:red[**🔴 {short_name}: {d_bn}/{d_tot} ({ov_desc} - CÒN GIƯỜNG!)**]]"
@@ -1026,8 +1106,15 @@ def page_bed_management(ref_path, admin=True, render_kpi_fn=None, show_uploader=
             else:
                 status_tag = "✅ :green[Không trùng]"
 
+            extra_tags = []
+            if not day_unassigned.empty:
+                extra_tags.append(f":orange[**{len(day_unassigned)} chưa gán giường**]")
+            if not day_missing_kq.empty:
+                extra_tags.append(f":red[**{len(day_missing_kq)} có ngày ra trống KQ**]")
+            extra_str = ("  |  " + " • ".join(extra_tags)) if extra_tags else ""
+
             exp_lbl = (
-                f"**{date_str}**  |  {status_tag}  |  "
+                f"**{date_str}**  |  {status_tag}{extra_str}  |  "
                 f"Tổng BN: **{day_actual_bn}/{day_total_pd}** ({day_pct:.0f}%)  —  {dept_summary_str}"
             )
 
@@ -1041,6 +1128,14 @@ def page_bed_management(ref_path, admin=True, render_kpi_fn=None, show_uploader=
                 if not day_ov.empty:
                     st.markdown("**⚠️ Danh sách cặp trùng giường trong ngày:**")
                     st.dataframe(day_ov, use_container_width=True, hide_index=True)
+
+                if not day_missing_kq.empty:
+                    st.warning(f"⚠️ **Cảnh báo: {len(day_missing_kq)} bệnh nhân đã có NGÀY RA nhưng trống NGÀY KẾT QUẢ (`NGAY_KQ`):**")
+                    st.dataframe(day_missing_kq, use_container_width=True, hide_index=True)
+
+                if not day_unassigned.empty:
+                    st.warning(f"⚠️ **Cảnh báo: {len(day_unassigned)} bệnh nhân chưa gán mã giường (`MA_GIUONG_CV130` trống):**")
+                    st.dataframe(day_unassigned, use_container_width=True, hide_index=True)
 
                 for dept in day_depts:
                     _render_dept_grid(
@@ -1067,7 +1162,7 @@ def page_bed_management(ref_path, admin=True, render_kpi_fn=None, show_uploader=
                     ])
                     st.download_button(
                         f"⬇️ Tải Excel chi tiết ngày {date_str}",
-                        data=_build_excel_bytes(day_sum, day_ov, day_detail),
+                        data=_build_excel_bytes(day_sum, day_ov, day_detail, day_unassigned, day_missing_kq),
                         file_name=f"Giuong_{cur_d.strftime('%Y%m%d')}.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         key=f"dl_day_{cur_d.strftime('%Y%m%d')}",
@@ -1094,8 +1189,8 @@ def page_bed_management(ref_path, admin=True, render_kpi_fn=None, show_uploader=
         else:
             st.dataframe(df_all_detail, use_container_width=True, hide_index=True, height=460)
             st.download_button(
-                "⬇️ Xuất Excel báo cáo giường theo ngày (3 sheet)",
-                data=_build_excel_bytes(df_all_summary, df_all_ov, df_all_detail),
+                "⬇️ Xuất Excel báo cáo giường theo ngày",
+                data=_build_excel_bytes(df_all_summary, df_all_ov, df_all_detail, df_all_unassigned, df_all_missing_kq),
                 file_name=f"BaoCao_Giuong_{range_start.strftime('%Y%m%d')}_{range_end.strftime('%Y%m%d')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
