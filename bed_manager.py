@@ -998,8 +998,7 @@ def _show_bed_modal(dept, bed, day_str=""):
                     Trạng thái: <b>{st_icon}{html.escape(p.get('TRANG_THAI_BN', ''))}</b>{ma_benh_txt}
                     • LK: <span style="color:#64748B;">{html.escape(p['MA_LK'])}</span>
                 </div>
-                {other_bed_html}
-                {''.join(slots_html_parts)}
+                {other_bed_html}{''.join(slots_html_parts)}
             </div>
             """,
             unsafe_allow_html=True,
