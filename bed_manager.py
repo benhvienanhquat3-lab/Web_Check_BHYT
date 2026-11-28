@@ -288,12 +288,17 @@ def save_bed_dataset(df_bed, src_filename):
     os.replace(tmp, BED_LATEST_FILE)
 
 
+@st.cache_data(show_spinner=False)
+def _load_bed_dataset_cached(path, mtime):
+    with open(path, "rb") as fh:
+        return pickle.load(fh)
+
+
 def load_bed_dataset():
     if not os.path.exists(BED_LATEST_FILE):
         return None
     try:
-        with open(BED_LATEST_FILE, "rb") as fh:
-            return pickle.load(fh)
+        return _load_bed_dataset_cached(BED_LATEST_FILE, os.path.getmtime(BED_LATEST_FILE))
     except Exception:
         return None
 
@@ -1234,26 +1239,21 @@ def _render_dept_grid(dept, status_filter, search_kw, key_prefix="d", day_str=""
                         _show_bed_modal(dept, b, day_str=day_str)
 
 
-# ======================= TRANG CHÍNH: SƠ ĐỒ GIƯỜNG =======================
-def page_bed_management(ref_path, admin=True, render_kpi_fn=None, show_uploader=True):
-    _inject_bed_css()
-    st.markdown(
-        "<div class='section-title'>🛏️ Sơ đồ & Kiểm tra trùng Giường bệnh theo từng ngày (MA_NHOM = 15 • MA_GIUONG_CV130)</div>",
-        unsafe_allow_html=True,
-    )
-
+@st.cache_data(show_spinner=False)
+def _compute_daily_packs_cached(
+    ref_path,
+    ref_mtime,
+    bed_mtime,
+    tu_ngay_iso,
+    tu_gio_iso,
+    den_ngay_iso,
+    den_gio_iso,
+    chosen_codes_tuple,
+):
+    """Cache toàn bộ kết quả tính sơ đồ giường theo ngày trên RAM dùng chung cho mọi tài khoản."""
     bed_catalog = load_bed_catalog(ref_path)
-    if not bed_catalog:
-        st.warning("⚠️ Chưa đọc được danh mục giường (`dm_giuong_chitiet` hoặc `data_giuong`) từ file tham chiếu ở Sidebar.")
-        return
-
-    src_cat = bed_catalog[0].get("SOURCE", "data_giuong")
-    st.caption(f"📚 Nguồn danh mục giường đang dùng: **{src_cat}**")
-
     saved = load_bed_dataset()
     df_bed_all = saved["df_bed"] if saved else pd.DataFrame()
-    src_name = saved.get("src_filename", "") if saved else ""
-    updated_at = saved.get("updated_at", "") if saved else ""
 
     if not df_bed_all.empty:
         if "MISSING_KQ_HAS_RA" not in df_bed_all.columns:
@@ -1265,124 +1265,13 @@ def page_bed_management(ref_path, admin=True, render_kpi_fn=None, show_uploader=
         if "SO_LUONG_NUM" not in df_bed_all.columns:
             df_bed_all["SO_LUONG_NUM"] = None
 
-    if admin and show_uploader:
-        exp_title = (
-            f"📤 Nạp báo cáo giường mới (đang dùng: {src_name} • cập nhật {updated_at})"
-            if src_name else
-            "📤 Nạp file báo cáo có dữ liệu giường (MA_NHOM = 15 & MA_GIUONG_CV130)"
-        )
-        with st.expander(exp_title, expanded=df_bed_all.empty):
-            c_up, c_btn = st.columns([3.5, 1], vertical_alignment="center")
-            with c_up:
-                up_file = st.file_uploader(
-                    "Chọn file Excel (.xlsx, .xls) hoặc XML (.xml) có MA_NHOM = 15",
-                    type=["xlsx", "xls", "xml"],
-                    key="bed_file_uploader",
-                    label_visibility="collapsed",
-                )
-            with c_btn:
-                load_btn = st.button("📥 Nạp dữ liệu giường", type="primary", use_container_width=True)
-
-            if load_btn:
-                if up_file is None:
-                    st.warning("Vui lòng chọn file trước khi nạp.")
-                else:
-                    try:
-                        with st.spinner("Đang lọc dữ liệu MA_NHOM = 15..."):
-                            df_raw = read_input_dataframe(up_file.getvalue(), up_file.name)
-                            df_bed_new = extract_bed_records(df_raw)
-                        if df_bed_new.empty:
-                            st.error("❌ File vừa tải lên có **0 dòng `MA_NHOM = 15`**.")
-                        else:
-                            save_bed_dataset(df_bed_new, up_file.name)
-                            st.session_state.pop("bed_applied_filter", None)
-                            st.toast(f"✅ Đã nạp {len(df_bed_new):,} dòng giường từ {up_file.name}", icon="🛏️")
-                            st.rerun()
-                    except Exception as ex:
-                        st.error(f"❌ Lỗi đọc file: {ex}")
-
-    today = date.today()
-    if not df_bed_all.empty:
-        min_d = df_bed_all["START_DT"].min().date()
-        max_d = df_bed_all["END_DT"].max().date()
-    else:
-        min_d, max_d = today, today
-
-    khoa_labels = [f"{d['TEN_KHOA']} ({d['MA_KHOA']})" for d in bed_catalog]
-
-    if "bed_applied_filter" not in st.session_state:
-        st.session_state["bed_applied_filter"] = {
-            "tu_ngay": min_d,
-            "tu_gio": dt_time(0, 0),
-            "den_ngay": max_d,
-            "den_gio": dt_time(23, 59),
-            "sel_khoa": [],
-            "status_filter": "Tất cả",
-            "search_kw": "",
-        }
-
-    flt = st.session_state["bed_applied_filter"]
-
-    # ----- Khung lọc có nút Tìm kiếm -----
-    with st.form("bed_search_form", clear_on_submit=False):
-        t1, t2, t3, t4 = st.columns([1.3, 1.0, 1.3, 1.0], gap="small")
-        with t1:
-            in_tu_ngay = st.date_input("Từ ngày", value=flt["tu_ngay"], format="DD/MM/YYYY")
-        with t2:
-            in_tu_gio = st.time_input("Từ giờ", value=flt["tu_gio"], step=300)
-        with t3:
-            in_den_ngay = st.date_input("Đến ngày", value=flt["den_ngay"], format="DD/MM/YYYY")
-        with t4:
-            in_den_gio = st.time_input("Đến giờ", value=flt["den_gio"], step=300)
-
-        f1, f2, f3, f4 = st.columns([1.9, 1.3, 1.5, 0.9], gap="small", vertical_alignment="bottom")
-        with f1:
-            in_khoa = st.multiselect(
-                "Khoa nội trú",
-                options=khoa_labels,
-                default=[k for k in flt["sel_khoa"] if k in khoa_labels],
-                placeholder="Tất cả khoa...",
-            )
-        with f2:
-            status_opts = ["Tất cả", "Giường trống", "Đang nằm riêng", "Trùng / Nằm ghép", "🚨 Nam - Nữ nằm chung"]
-            in_status = st.selectbox(
-                "Trạng thái giường",
-                options=status_opts,
-                index=status_opts.index(flt["status_filter"]) if flt["status_filter"] in status_opts else 0,
-            )
-        with f3:
-            in_kw = st.text_input("Tìm nhanh", value=flt["search_kw"], placeholder="Mã giường H001, Phòng, Tên BN...")
-        with f4:
-            submitted = st.form_submit_button("🔍 Tìm kiếm", type="primary", use_container_width=True)
-
-        if submitted:
-            st.session_state["bed_applied_filter"] = {
-                "tu_ngay": in_tu_ngay,
-                "tu_gio": in_tu_gio,
-                "den_ngay": in_den_ngay,
-                "den_gio": in_den_gio,
-                "sel_khoa": in_khoa,
-                "status_filter": in_status,
-                "search_kw": in_kw,
-            }
-            flt = st.session_state["bed_applied_filter"]
-
-    tu_ngay, tu_gio = flt["tu_ngay"], flt["tu_gio"]
-    den_ngay, den_gio = flt["den_ngay"], flt["den_gio"]
-    sel_khoa = flt["sel_khoa"]
-    status_filter = flt["status_filter"]
-    search_kw = flt["search_kw"]
-
+    tu_ngay = date.fromisoformat(tu_ngay_iso)
+    den_ngay = date.fromisoformat(den_ngay_iso)
+    tu_gio = dt_time.fromisoformat(tu_gio_iso)
+    den_gio = dt_time.fromisoformat(den_gio_iso)
     range_start = datetime.combine(tu_ngay, tu_gio)
     range_end = datetime.combine(den_ngay, den_gio)
-    if range_start > range_end:
-        st.error("⚠️ Thời điểm 'Từ ngày/giờ' phải nhỏ hơn hoặc bằng 'Đến ngày/giờ'.")
-        return
-
     total_days = (den_ngay - tu_ngay).days + 1
-    if total_days > 62:
-        st.warning(f"⚠️ Khoảng thời gian đang chọn dài **{total_days} ngày** (tối đa 62 ngày/lần). Vui lòng thu hẹp khoảng ngày.")
-        return
 
     if not df_bed_all.empty:
         mask_time = (df_bed_all["START_DT"] <= range_end) & (df_bed_all["END_DT"] >= range_start)
@@ -1394,13 +1283,11 @@ def page_bed_management(ref_path, admin=True, render_kpi_fn=None, show_uploader=
             "IS_ESTIMATED_END", "SO_LUONG_STR", "SO_LUONG_NUM",
         ])
 
-    if sel_khoa:
-        chosen_codes = [s.split("(")[-1].rstrip(")") for s in sel_khoa]
-        cat_view = [d for d in bed_catalog if d["MA_KHOA"] in chosen_codes]
+    if chosen_codes_tuple:
+        cat_view = [d for d in bed_catalog if d["MA_KHOA"] in chosen_codes_tuple]
     else:
         cat_view = bed_catalog
 
-    # ----- TÍNH ĐỘC LẬP TỪNG NGÀY MỘT -----
     daily_packs = []
     all_ov_frames = []
     all_detail_frames = []
@@ -1491,8 +1378,198 @@ def page_bed_management(ref_path, admin=True, render_kpi_fn=None, show_uploader=
     df_all_gaps = pd.concat(all_gap_frames, ignore_index=True) if all_gap_frames else pd.DataFrame()
     df_all_sl_warn = pd.concat(all_sl_warn_frames, ignore_index=True) if all_sl_warn_frames else pd.DataFrame()
     df_all_summary = pd.DataFrame(all_summary_rows)
-
     total_beds_catalog = sum(len(d["BEDS"]) for d in cat_view)
+
+    return (
+        daily_packs,
+        df_all_ov,
+        df_all_detail,
+        df_all_unassigned,
+        df_all_missing_kq,
+        df_all_gaps,
+        df_all_sl_warn,
+        df_all_summary,
+        total_beds_catalog,
+    )
+
+
+# ======================= TRANG CHÍNH: SƠ ĐỒ GIƯỜNG =======================
+def page_bed_management(ref_path, admin=True, render_kpi_fn=None, show_uploader=True):
+    _inject_bed_css()
+    st.markdown(
+        "<div class='section-title'>🛏️ Sơ đồ & Kiểm tra trùng Giường bệnh theo từng ngày (MA_NHOM = 15 • MA_GIUONG_CV130)</div>",
+        unsafe_allow_html=True,
+    )
+
+    bed_catalog = load_bed_catalog(ref_path)
+    if not bed_catalog:
+        st.warning("⚠️ Chưa đọc được danh mục giường (`dm_giuong_chitiet` hoặc `data_giuong`) từ file tham chiếu ở Sidebar.")
+        return
+
+    src_cat = bed_catalog[0].get("SOURCE", "data_giuong")
+    st.caption(f"📚 Nguồn danh mục giường đang dùng: **{src_cat}**")
+
+    saved = load_bed_dataset()
+    df_bed_all = saved["df_bed"] if saved else pd.DataFrame()
+    src_name = saved.get("src_filename", "") if saved else ""
+    updated_at = saved.get("updated_at", "") if saved else ""
+
+    if not df_bed_all.empty:
+        if "MISSING_KQ_HAS_RA" not in df_bed_all.columns:
+            df_bed_all["MISSING_KQ_HAS_RA"] = False
+        if "IS_ESTIMATED_END" not in df_bed_all.columns:
+            df_bed_all["IS_ESTIMATED_END"] = False
+        if "SO_LUONG_STR" not in df_bed_all.columns:
+            df_bed_all["SO_LUONG_STR"] = ""
+        if "SO_LUONG_NUM" not in df_bed_all.columns:
+            df_bed_all["SO_LUONG_NUM"] = None
+
+    if admin and show_uploader:
+        exp_title = (
+            f"📤 Nạp báo cáo giường mới (đang dùng: {src_name} • cập nhật {updated_at})"
+            if src_name else
+            "📤 Nạp file báo cáo có dữ liệu giường (MA_NHOM = 15 & MA_GIUONG_CV130)"
+        )
+        with st.expander(exp_title, expanded=df_bed_all.empty):
+            c_up, c_btn = st.columns([3.5, 1], vertical_alignment="center")
+            with c_up:
+                up_file = st.file_uploader(
+                    "Chọn file Excel (.xlsx, .xls) hoặc XML (.xml) có MA_NHOM = 15",
+                    type=["xlsx", "xls", "xml"],
+                    key="bed_file_uploader",
+                    label_visibility="collapsed",
+                )
+            with c_btn:
+                load_btn = st.button("📥 Nạp dữ liệu giường", type="primary", use_container_width=True)
+
+            if load_btn:
+                if up_file is None:
+                    st.warning("Vui lòng chọn file trước khi nạp.")
+                else:
+                    try:
+                        with st.spinner("Đang lọc dữ liệu MA_NHOM = 15..."):
+                            df_raw = read_input_dataframe(up_file.getvalue(), up_file.name)
+                            df_bed_new = extract_bed_records(df_raw)
+                        if df_bed_new.empty:
+                            st.error("❌ File vừa tải lên có **0 dòng `MA_NHOM = 15`**.")
+                        else:
+                            save_bed_dataset(df_bed_new, up_file.name)
+                            st.session_state.pop("bed_applied_filter", None)
+                            st.session_state.pop("bed_selected_day", None)
+                            st.toast(f"✅ Đã nạp {len(df_bed_new):,} dòng giường từ {up_file.name}", icon="🛏️")
+                            st.rerun()
+                    except Exception as ex:
+                        st.error(f"❌ Lỗi đọc file: {ex}")
+
+    today = date.today()
+    if not df_bed_all.empty:
+        min_d = df_bed_all["START_DT"].min().date()
+        max_d = df_bed_all["END_DT"].max().date()
+    else:
+        min_d, max_d = today, today
+
+    khoa_labels = [f"{d['TEN_KHOA']} ({d['MA_KHOA']})" for d in bed_catalog]
+
+    if "bed_applied_filter" not in st.session_state:
+        default_tu = max(min_d, max_d - timedelta(days=6)) if max_d >= min_d else min_d
+        st.session_state["bed_applied_filter"] = {
+            "tu_ngay": default_tu,
+            "tu_gio": dt_time(0, 0),
+            "den_ngay": max_d,
+            "den_gio": dt_time(23, 59),
+            "sel_khoa": [],
+            "status_filter": "Tất cả",
+            "search_kw": "",
+        }
+
+    flt = st.session_state["bed_applied_filter"]
+
+    # ----- Khung lọc có nút Tìm kiếm -----
+    with st.form("bed_search_form", clear_on_submit=False):
+        t1, t2, t3, t4 = st.columns([1.3, 1.0, 1.3, 1.0], gap="small")
+        with t1:
+            in_tu_ngay = st.date_input("Từ ngày", value=flt["tu_ngay"], format="DD/MM/YYYY")
+        with t2:
+            in_tu_gio = st.time_input("Từ giờ", value=flt["tu_gio"], step=300)
+        with t3:
+            in_den_ngay = st.date_input("Đến ngày", value=flt["den_ngay"], format="DD/MM/YYYY")
+        with t4:
+            in_den_gio = st.time_input("Đến giờ", value=flt["den_gio"], step=300)
+
+        f1, f2, f3, f4 = st.columns([1.9, 1.3, 1.5, 0.9], gap="small", vertical_alignment="bottom")
+        with f1:
+            in_khoa = st.multiselect(
+                "Khoa nội trú",
+                options=khoa_labels,
+                default=[k for k in flt["sel_khoa"] if k in khoa_labels],
+                placeholder="Tất cả khoa...",
+            )
+        with f2:
+            status_opts = ["Tất cả", "Giường trống", "Đang nằm riêng", "Trùng / Nằm ghép", "🚨 Nam - Nữ nằm chung"]
+            in_status = st.selectbox(
+                "Trạng thái giường",
+                options=status_opts,
+                index=status_opts.index(flt["status_filter"]) if flt["status_filter"] in status_opts else 0,
+            )
+        with f3:
+            in_kw = st.text_input("Tìm nhanh", value=flt["search_kw"], placeholder="Mã giường H001, Phòng, Tên BN...")
+        with f4:
+            submitted = st.form_submit_button("🔍 Tìm kiếm", type="primary", use_container_width=True)
+
+        if submitted:
+            st.session_state["bed_applied_filter"] = {
+                "tu_ngay": in_tu_ngay,
+                "tu_gio": in_tu_gio,
+                "den_ngay": in_den_ngay,
+                "den_gio": in_den_gio,
+                "sel_khoa": in_khoa,
+                "status_filter": in_status,
+                "search_kw": in_kw,
+            }
+            flt = st.session_state["bed_applied_filter"]
+
+    tu_ngay, tu_gio = flt["tu_ngay"], flt["tu_gio"]
+    den_ngay, den_gio = flt["den_ngay"], flt["den_gio"]
+    sel_khoa = flt["sel_khoa"]
+    status_filter = flt["status_filter"]
+    search_kw = flt["search_kw"]
+
+    range_start = datetime.combine(tu_ngay, tu_gio)
+    range_end = datetime.combine(den_ngay, den_gio)
+    if range_start > range_end:
+        st.error("⚠️ Thời điểm 'Từ ngày/giờ' phải nhỏ hơn hoặc bằng 'Đến ngày/giờ'.")
+        return
+
+    total_days = (den_ngay - tu_ngay).days + 1
+    if total_days > 62:
+        st.warning(f"⚠️ Khoảng thời gian đang chọn dài **{total_days} ngày** (tối đa 62 ngày/lần). Vui lòng thu hẹp khoảng ngày.")
+        return
+
+    chosen_codes_tuple = tuple(sorted([s.split("(")[-1].rstrip(")") for s in sel_khoa])) if sel_khoa else ()
+    ref_mtime = os.path.getmtime(ref_path) if (ref_path and os.path.exists(ref_path)) else 0.0
+    bed_mtime = os.path.getmtime(BED_LATEST_FILE) if os.path.exists(BED_LATEST_FILE) else 0.0
+
+    (
+        daily_packs,
+        df_all_ov,
+        df_all_detail,
+        df_all_unassigned,
+        df_all_missing_kq,
+        df_all_gaps,
+        df_all_sl_warn,
+        df_all_summary,
+        total_beds_catalog,
+    ) = _compute_daily_packs_cached(
+        ref_path,
+        ref_mtime,
+        bed_mtime,
+        tu_ngay.isoformat(),
+        tu_gio.isoformat(),
+        den_ngay.isoformat(),
+        den_gio.isoformat(),
+        chosen_codes_tuple,
+    )
+
     days_with_ov = sum(1 for p in daily_packs if p["n_ov"] > 0)
     total_ov_pairs = len(df_all_ov)
     total_mixed_pairs = sum(p["n_mixed"] for p in daily_packs)
@@ -1529,20 +1606,102 @@ def page_bed_management(ref_path, admin=True, render_kpi_fn=None, show_uploader=
         "📋 Danh sách chi tiết theo ngày",
     ])
 
-    # ----- TAB 1: XEM TỪNG NGÀY MỘT -----
+    # ----- TAB 1: XEM TỪNG NGÀY MỘT (TỐI ƯU LAZY RENDER CHỐNG LAG) -----
     with tab_daily:
-        only_conflict_days = st.checkbox(
-            "Chỉ hiện những ngày có nằm trùng giường",
-            value=False,
-            key="bed_only_conflict_days",
-        )
+        c_chk, c_hint = st.columns([1.4, 2.6], vertical_alignment="center")
+        with c_chk:
+            only_conflict_days = st.checkbox(
+                "Chỉ hiện những ngày có nằm trùng giường",
+                value=False,
+                key="bed_only_conflict_days",
+            )
+        with c_hint:
+            st.caption("⚡ Chế độ chống lag: chọn 1 ngày bên dưới để vẽ sơ đồ giường (hỗ trợ 30–50 tài khoản xem cùng lúc).")
 
-        shown_any = False
-        for pack in daily_packs:
-            if only_conflict_days and pack["n_ov"] == 0:
-                continue
+        filtered_packs = [p for p in daily_packs if not (only_conflict_days and p["n_ov"] == 0)]
+        if not filtered_packs:
+            st.success("✅ Không có ngày nào bị trùng giường trong khoảng thời gian đã chọn.")
+        else:
+            day_options = []
+            pack_by_label = {}
+            overview_rows = []
 
-            shown_any = True
+            for pack in filtered_packs:
+                date_str = pack["date_str"]
+                day_depts = pack["depts"]
+                day_ov = pack["ov"]
+                day_actual_bn = sum(d["actual_patients"] for d in day_depts)
+                day_total_pd = sum(d["total_approved"] for d in day_depts)
+                day_empty_beds = sum(d["empty"] for d in day_depts)
+                day_pct = (day_actual_bn / day_total_pd * 100) if day_total_pd else 0.0
+
+                has_weird_overlap_day = False
+                for d in day_depts:
+                    if not day_ov.empty:
+                        ov_sub = day_ov[day_ov["Mã khoa"].astype(str).str.contains(d["ma_khoa"], na=False)]
+                        d_ov = len(ov_sub)
+                    else:
+                        d_ov = 0
+                    if ((d_ov > 0) or (d["shared"] > 0)) and d["empty"] > 0:
+                        has_weird_overlap_day = True
+                        break
+
+                day_ov_desc = _format_overlap_desc(
+                    pack["n_mixed"], pack["n_multi_bed"], pack["n_self"], pack["n_time_only"]
+                )
+                if has_weird_overlap_day:
+                    st_txt = f"🚨 CÒN {day_empty_beds} TRỐNG VẪN TRÙNG ({day_ov_desc or 'ghép'})"
+                elif pack["n_ov"] > 0:
+                    st_txt = f"🚨 {day_ov_desc}" if (pack["n_mixed"] > 0 or pack["n_multi_bed"] > 0) else f"⚠️ {day_ov_desc}"
+                else:
+                    st_txt = "✅ Không trùng"
+
+                extra_bits = []
+                if not pack["unassigned"].empty:
+                    extra_bits.append(f"{len(pack['unassigned'])} chưa gán")
+                if not pack["missing_kq"].empty:
+                    extra_bits.append(f"{len(pack['missing_kq'])} trống KQ")
+                if not pack["gaps"].empty:
+                    extra_bits.append(f"{len(pack['gaps'])} hở giờ")
+                if not pack["sl_warn"].empty:
+                    extra_bits.append(f"{len(pack['sl_warn'])} ngược SL")
+                extra_s = (" | " + ", ".join(extra_bits)) if extra_bits else ""
+
+                opt_lbl = f"{date_str}  |  {st_txt}  |  BN: {day_actual_bn}/{day_total_pd} ({day_pct:.0f}%) • Trống: {day_empty_beds}{extra_s}"
+                day_options.append(opt_lbl)
+                pack_by_label[opt_lbl] = (pack, has_weird_overlap_day)
+
+                overview_rows.append({
+                    "Ngày": date_str,
+                    "Trạng thái": st_txt,
+                    "Tổng BN / PD": f"{day_actual_bn}/{day_total_pd} ({day_pct:.0f}%)",
+                    "Giường trống": day_empty_beds,
+                    "Lượt trùng": pack["n_ov"],
+                    "Cảnh báo khác": ", ".join(extra_bits) if extra_bits else "—",
+                })
+
+            if len(filtered_packs) > 1:
+                with st.expander(f"📊 Bảng tổng quan nhanh {len(filtered_packs)} ngày (nhấn để thu gọn/mở)", expanded=False):
+                    st.dataframe(pd.DataFrame(overview_rows), use_container_width=True, hide_index=True)
+
+            # Mặc định chọn ngày mới nhất (cuối danh sách) để xem ngay
+            default_idx = len(day_options) - 1
+            prev_sel_date = st.session_state.get("bed_selected_day")
+            if prev_sel_date:
+                for i_opt, lbl in enumerate(day_options):
+                    if lbl.startswith(prev_sel_date):
+                        default_idx = i_opt
+                        break
+
+            chosen_lbl = st.selectbox(
+                "📅 Chọn ngày cần xem sơ đồ chi tiết:",
+                options=day_options,
+                index=default_idx,
+                key="bed_day_selector",
+            )
+            pack, has_weird_overlap_day = pack_by_label[chosen_lbl]
+            st.session_state["bed_selected_day"] = pack["date_str"]
+
             date_str = pack["date_str"]
             cur_d = pack["cur_d"]
             day_depts = pack["depts"]
@@ -1552,143 +1711,66 @@ def page_bed_management(ref_path, admin=True, render_kpi_fn=None, show_uploader=
             day_missing_kq = pack["missing_kq"]
             day_gaps = pack["gaps"]
             day_sl_warn = pack["sl_warn"]
-
-            day_actual_bn = sum(d["actual_patients"] for d in day_depts)
-            day_total_pd = sum(d["total_approved"] for d in day_depts)
             day_empty_beds = sum(d["empty"] for d in day_depts)
-            day_pct = (day_actual_bn / day_total_pd * 100) if day_total_pd else 0.0
 
-            dept_chips = []
-            has_weird_overlap_day = False
-
-            for d in day_depts:
-                short_name = _short_dept_name(d["ma_khoa"], d["ten_khoa"])
-                d_bn = d["actual_patients"]
-                d_tot = d["total_approved"]
-                d_emp = d["empty"]
-
-                if not day_ov.empty:
-                    ov_sub = day_ov[day_ov["Mã khoa"].astype(str).str.contains(d["ma_khoa"], na=False)]
-                    d_ov = len(ov_sub)
-                    d_mixed = int(ov_sub["Cảnh báo"].str.contains("NAM - NỮ", na=False).sum())
-                    d_mb = int(ov_sub["Cảnh báo"].str.contains("2 GIƯỜNG", na=False).sum())
-                    d_self = int(ov_sub["Cảnh báo"].str.contains("Tự trùng", na=False).sum())
-                    d_time = d_ov - d_mixed - d_mb - d_self
-                else:
-                    d_ov = d_mixed = d_mb = d_self = d_time = 0
-
-                ov_desc = _format_overlap_desc(d_mixed, d_mb, d_self, d_time)
-                has_conflict_or_shared = (d_ov > 0) or (d["shared"] > 0)
-
-                if has_conflict_or_shared and d_emp > 0:
-                    has_weird_overlap_day = True
-                    reason_txt = ov_desc if ov_desc else f"{d['shared']} ghép"
-                    dept_chips.append(
-                        f":red-background[:red[**🔴 {short_name}: {d_bn}/{d_tot} (Trống {d_emp} • {reason_txt})**]]"
-                    )
-                elif d_ov > 0:
-                    dept_chips.append(f":red[**{short_name}: {d_bn}/{d_tot} ({ov_desc})**]")
-                elif d["shared"] > 0:
-                    dept_chips.append(f":orange[**{short_name}: {d_bn}/{d_tot} (Trống {d_emp})**]")
-                elif d_bn > 0:
-                    dept_chips.append(f":blue[**{short_name}: {d_bn}/{d_tot} (Trống {d_emp})**]")
-                else:
-                    dept_chips.append(f":gray[{short_name}: 0/{d_tot}]")
-
-            dept_summary_str = "  •  ".join(dept_chips)
-
-            day_ov_desc = _format_overlap_desc(
-                pack["n_mixed"], pack["n_multi_bed"], pack["n_self"], pack["n_time_only"]
-            )
             if has_weird_overlap_day:
-                lbl_detail = day_ov_desc if day_ov_desc else "nằm ghép"
-                status_tag = f":red-background[:red[**🚨 CÒN {day_empty_beds} GIƯỜNG TRỐNG VẪN TRÙNG ({lbl_detail})**]]"
-            elif pack["n_ov"] > 0:
-                if pack["n_mixed"] > 0 or pack["n_multi_bed"] > 0:
-                    status_tag = f"🚨 :red[**{day_ov_desc}**]"
-                else:
-                    status_tag = f"⚠️ :orange[**{day_ov_desc}**]"
-            else:
-                status_tag = "✅ :green[Không trùng]"
+                st.error(
+                    f"🔴 **CẢNH BÁO BẤT THƯỜNG:** Ngày **{date_str}** vẫn còn **{day_empty_beds} giường trống** "
+                    f"nhưng vẫn phát sinh nằm ghép / trùng giường!"
+                )
 
-            extra_tags = []
-            if not day_unassigned.empty:
-                extra_tags.append(f":orange[**{len(day_unassigned)} chưa gán giường**]")
-            if not day_missing_kq.empty:
-                extra_tags.append(f":red[**{len(day_missing_kq)} có ngày ra trống KQ**]")
-            if not day_gaps.empty:
-                extra_tags.append(f":orange[**{len(day_gaps)} hở giờ ≥{GAP_WARNING_MINUTES}p**]")
+            if not day_ov.empty:
+                st.markdown("**⚠️ Danh sách trùng giường / trùng giờ trong ngày:**")
+                st.dataframe(day_ov, use_container_width=True, hide_index=True)
+
             if not day_sl_warn.empty:
-                extra_tags.append(f":red[**{len(day_sl_warn)} ngược SL**]")
-            extra_str = ("  |  " + " • ".join(extra_tags)) if extra_tags else ""
+                st.error(f"⚠️ **Cảnh báo ngược Số lượng giường ({len(day_sl_warn)} BN):**")
+                st.dataframe(day_sl_warn, use_container_width=True, hide_index=True)
 
-            exp_lbl = (
-                f"**{date_str}**  |  {status_tag}{extra_str}  |  "
-                f"Tổng BN: **{day_actual_bn}/{day_total_pd}** ({day_pct:.0f}%) • Trống: **{day_empty_beds}**  —  {dept_summary_str}"
-            )
+            if not day_gaps.empty:
+                st.warning(f"⚠️ **Cảnh báo hở khung giờ nằm giường ≥ {GAP_WARNING_MINUTES} phút ({len(day_gaps)} lượt):**")
+                st.dataframe(day_gaps, use_container_width=True, hide_index=True)
 
-            with st.expander(exp_lbl, expanded=(total_days == 1)):
-                if has_weird_overlap_day:
-                    st.error(
-                        f"🔴 **CẢNH BÁO BẤT THƯỜNG:** Ngày **{date_str}** vẫn còn **{day_empty_beds} giường trống** "
-                        f"nhưng vẫn phát sinh nằm ghép / trùng giường!"
-                    )
+            if not day_missing_kq.empty:
+                st.warning(f"⚠️ **Cảnh báo: {len(day_missing_kq)} bệnh nhân đã có NGÀY RA nhưng trống NGÀY KẾT QUẢ (`NGAY_KQ`):**")
+                st.dataframe(day_missing_kq, use_container_width=True, hide_index=True)
 
-                if not day_ov.empty:
-                    st.markdown("**⚠️ Danh sách trùng giường / trùng giờ trong ngày:**")
-                    st.dataframe(day_ov, use_container_width=True, hide_index=True)
+            if not day_unassigned.empty:
+                st.warning(f"⚠️ **Cảnh báo: {len(day_unassigned)} bệnh nhân chưa gán mã giường (`MA_GIUONG_CV130` trống):**")
+                st.dataframe(day_unassigned, use_container_width=True, hide_index=True)
 
-                if not day_sl_warn.empty:
-                    st.error(f"⚠️ **Cảnh báo ngược Số lượng giường ({len(day_sl_warn)} BN):**")
-                    st.dataframe(day_sl_warn, use_container_width=True, hide_index=True)
+            for dept in day_depts:
+                _render_dept_grid(
+                    dept,
+                    status_filter,
+                    search_kw,
+                    key_prefix=f"d_{cur_d.strftime('%Y%m%d')}",
+                    day_str=date_str,
+                )
 
-                if not day_gaps.empty:
-                    st.warning(f"⚠️ **Cảnh báo hở khung giờ nằm giường ≥ {GAP_WARNING_MINUTES} phút ({len(day_gaps)} lượt):**")
-                    st.dataframe(day_gaps, use_container_width=True, hide_index=True)
-
-                if not day_missing_kq.empty:
-                    st.warning(f"⚠️ **Cảnh báo: {len(day_missing_kq)} bệnh nhân đã có NGÀY RA nhưng trống NGÀY KẾT QUẢ (`NGAY_KQ`):**")
-                    st.dataframe(day_missing_kq, use_container_width=True, hide_index=True)
-
-                if not day_unassigned.empty:
-                    st.warning(f"⚠️ **Cảnh báo: {len(day_unassigned)} bệnh nhân chưa gán mã giường (`MA_GIUONG_CV130` trống):**")
-                    st.dataframe(day_unassigned, use_container_width=True, hide_index=True)
-
-                for dept in day_depts:
-                    _render_dept_grid(
-                        dept,
-                        status_filter,
-                        search_kw,
-                        key_prefix=f"d_{cur_d.strftime('%Y%m%d')}",
-                        day_str=date_str,
-                    )
-
-                if not day_detail.empty:
-                    day_sum = pd.DataFrame([
-                        {
-                            "Ngày": date_str,
-                            "Mã khoa": d["ma_khoa"],
-                            "Tên khoa": d["ten_khoa"],
-                            "BN thực tế": d["actual_patients"],
-                            "Giường phê duyệt": d["total_approved"],
-                            "Giường trống": d["empty"],
-                            "Nằm riêng": d["single"],
-                            "Trùng / Ghép": d["shared"],
-                        }
-                        for d in day_depts
-                    ])
-                    st.download_button(
-                        f"⬇️ Tải Excel chi tiết ngày {date_str}",
-                        data=_build_excel_bytes(
-                            day_sum, day_ov, day_detail, day_unassigned, day_missing_kq, day_gaps, day_sl_warn
-                        ),
-                        file_name=f"Giuong_{cur_d.strftime('%Y%m%d')}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key=f"dl_day_{cur_d.strftime('%Y%m%d')}",
-                    )
-
-        if not shown_any:
-            st.success("✅ Không có ngày nào bị trùng giường trong khoảng thời gian đã chọn.")
+            if not day_detail.empty:
+                day_sum = pd.DataFrame([
+                    {
+                        "Ngày": date_str,
+                        "Mã khoa": d["ma_khoa"],
+                        "Tên khoa": d["ten_khoa"],
+                        "BN thực tế": d["actual_patients"],
+                        "Giường phê duyệt": d["total_approved"],
+                        "Giường trống": d["empty"],
+                        "Nằm riêng": d["single"],
+                        "Trùng / Ghép": d["shared"],
+                    }
+                    for d in day_depts
+                ])
+                st.download_button(
+                    f"⬇️ Tải Excel chi tiết ngày {date_str}",
+                    data=_build_excel_bytes(
+                        day_sum, day_ov, day_detail, day_unassigned, day_missing_kq, day_gaps, day_sl_warn
+                    ),
+                    file_name=f"Giuong_{cur_d.strftime('%Y%m%d')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"dl_day_{cur_d.strftime('%Y%m%d')}",
+                )
 
     # ----- TAB 2: TỔNG HỢP TRÙNG GIƯỜNG -----
     with tab_ov:
