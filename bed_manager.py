@@ -9,6 +9,9 @@ Module độc lập: Sơ đồ & Kiểm tra trùng Giường bệnh nội trú (
 - BN trống cả NGAY_KQ và NGAY_RA: rải từ ngày bắt đầu đến 23:59 ngày lớn nhất
   của cột NGAY_KQ trong file.
 - BN có NGAY_RA nhưng trống NGAY_KQ: tách cảnh báo bảng phụ riêng theo ngày.
+- Cảnh báo đỏ trên thanh ngày khi có khoa vừa còn giường trống vừa nằm ghép/trùng.
+- Thẻ giường: hiện ✅ nếu Ra viện, thay LK bằng Năm sinh & Giới tính,
+  hiện ngày giờ Vào -> Ra và tô đỏ giờ lẻ (khác 00:00 / 23:59).
 =======================================================================
 """
 
@@ -44,20 +47,46 @@ def _normalize_gender(val):
     return _clean_str(val)
 
 
-def _calc_age_str(nam_sinh):
+def _extract_birth_year(nam_sinh):
     s = _clean_str(nam_sinh)
     if s.endswith(".0"):
         s = s[:-2]
     digits = "".join(ch for ch in s if ch.isdigit())
     if len(digits) >= 4:
+        return digits[:4]
+    return ""
+
+
+def _calc_age_str(nam_sinh):
+    yr_str = _extract_birth_year(nam_sinh)
+    if yr_str:
         try:
-            yr = int(digits[:4])
-            age = datetime.now().year - yr
+            age = datetime.now().year - int(yr_str)
             if 0 <= age <= 120:
                 return f"{age} tuổi"
         except Exception:
             pass
     return ""
+
+
+def _format_card_time_html(start_dt, end_dt):
+    """Định dạng dd/mm HH:MM -> dd/mm HH:MM; tô đỏ đậm giờ khác 00:00 (vào) hoặc khác 23:59 (ra)."""
+    s_hm = start_dt.strftime("%H:%M")
+    e_hm = end_dt.strftime("%H:%M")
+    s_txt = start_dt.strftime("%d/%m %H:%M")
+    e_txt = end_dt.strftime("%d/%m %H:%M")
+
+    if s_hm != "00:00":
+        s_html = f"<span style='color:#DC2626;font-weight:700;'>{s_txt}</span>"
+    else:
+        s_html = f"<span>{s_txt}</span>"
+
+    if e_hm != "23:59":
+        e_html = f"<span style='color:#DC2626;font-weight:700;'>{e_txt}</span>"
+    else:
+        e_html = f"<span>{e_txt}</span>"
+
+    return f"{s_html} → {e_html}"
 
 
 def _short_dept_name(ma_khoa, ten_khoa):
@@ -281,12 +310,10 @@ def extract_bed_records(df_raw):
             missing_kq_has_ra_flags.append(False)
             is_est_end_flags.append(False)
         elif ra_dt is not None:
-            # Có NGAY_RA nhưng trống NGAY_KQ -> lấy NGAY_RA làm mốc kết thúc & bật cảnh báo riêng
             en_dt = ra_dt
             missing_kq_has_ra_flags.append(True)
             is_est_end_flags.append(False)
         else:
-            # Trống cả NGAY_KQ và NGAY_RA -> rải đến 23:59 ngày MAX_NGAY_KQ
             en_dt = fallback_end_dt
             missing_kq_has_ra_flags.append(False)
             is_est_end_flags.append(True)
@@ -371,7 +398,6 @@ def build_bed_map_for_day(bed_catalog, df_day, day_start, day_end, day_str=""):
                     assigned_code = real_code
                     source_tag = "MA_GIUONG_CV130"
                 else:
-                    # TUYỆT ĐỐI KHÔNG GÁN TẠM -> Đưa vào bảng phụ Chưa gán mã giường
                     assigned_code = ""
                     source_tag = "Chưa gán"
                     unassigned_rows.append({
@@ -567,7 +593,8 @@ def _show_bed_modal(dept, bed, day_str=""):
 
     for idx, p in enumerate(bed["patients"], start=1):
         age_str = _calc_age_str(p.get("NAM_SINH", ""))
-        g_parts = [x for x in [p.get("GIOI_TINH", ""), age_str] if x]
+        yr_str = _extract_birth_year(p.get("NAM_SINH", ""))
+        g_parts = [x for x in [p.get("GIOI_TINH", ""), f"NS {yr_str}" if yr_str else "", age_str] if x]
         gt_tuoi = ", ".join(g_parts) if g_parts else "Chưa rõ"
         start_s = p["START_DT"].strftime("%d/%m/%Y %H:%M")
         end_s = p["END_DT"].strftime("%d/%m/%Y %H:%M")
@@ -577,6 +604,7 @@ def _show_bed_modal(dept, bed, day_str=""):
             end_s += " (theo NGAY_RA, trống KQ)"
         dv_txt = p.get("TEN_DICH_VU") or "Giường nội trú"
         ma_benh_txt = f" • Mã bệnh: <b>{html.escape(p['MA_BENH'])}</b>" if p.get("MA_BENH") else ""
+        st_icon = "✅ " if p.get("TRANG_THAI_BN") == "Ra viện" else ""
 
         st.markdown(
             f"""
@@ -588,7 +616,7 @@ def _show_bed_modal(dept, bed, day_str=""):
                                      width:24px;height:24px;border-radius:50%;background:#1D4ED8;
                                      color:#FFFFFF;font-size:12px;font-weight:700;">{idx}</span>
                         <span style="font-size:14.5px;font-weight:700;color:#0F172A;">
-                            {html.escape(p['TENBENHNHAN'])}
+                            {st_icon}{html.escape(p['TENBENHNHAN'])}
                         </span>
                     </div>
                     <span style="background:#EFF6FF;color:#1D4ED8;font-size:11.5px;font-weight:700;
@@ -599,13 +627,13 @@ def _show_bed_modal(dept, bed, day_str=""):
                 <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px;
                             font-size:12.5px;color:#475569;margin-bottom:8px;">
                     <div>Giới / Tuổi: <b style="color:#0F172A;">{html.escape(gt_tuoi)}</b></div>
-                    <div>Bắt đầu nằm: <b style="color:#0F172A;">{start_s}</b> → <b style="color:#0F172A;">{end_s}</b></div>
+                    <div>Thời gian nằm: <b style="color:#0F172A;">{start_s}</b> → <b style="color:#0F172A;">{end_s}</b></div>
                 </div>
                 <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:8px;
                             padding:7px 10px;font-size:12.5px;color:#334155;">
                     Dịch vụ giường: <b style="color:#0F172A;">{html.escape(dv_txt)}</b>
                     • Tỷ lệ TT: <b style="color:#15803D;">{int(p['TYLE_TT'])}%</b>
-                    • Trạng thái: <b>{html.escape(p.get('TRANG_THAI_BN', ''))}</b>{ma_benh_txt}
+                    • Trạng thái: <b>{st_icon}{html.escape(p.get('TRANG_THAI_BN', ''))}</b>{ma_benh_txt}
                 </div>
             </div>
             """,
@@ -634,7 +662,7 @@ def _inject_bed_css():
         .bed-dept-meta { font-size: 12px; color: #475569; display: flex; gap: 10px; flex-wrap: wrap; }
         .bed-card {
             border-radius: 8px; padding: 8px 10px; border: 1px solid;
-            font-size: 12px; line-height: 1.35; min-height: 76px;
+            font-size: 12px; line-height: 1.35; min-height: 92px;
         }
         .bed-card-occ {
             border-bottom-left-radius: 0; border-bottom-right-radius: 0; border-bottom: none;
@@ -657,12 +685,16 @@ def _inject_bed_css():
         .badge-overlap { background: #FEE2E2; color: #B91C1C; }
         .badge-mixed   { background: #DC2626; color: #FFFFFF; }
         .bed-bn {
-            font-size: 11.5px; color: #1E293B; white-space: nowrap;
+            font-size: 11.5px; font-weight: 600; color: #0F172A; white-space: nowrap;
             overflow: hidden; text-overflow: ellipsis;
         }
         .bed-sub {
             font-size: 10.5px; color: #64748B; white-space: nowrap;
             overflow: hidden; text-overflow: ellipsis;
+        }
+        .bed-time {
+            font-size: 10px; color: #475569; white-space: nowrap;
+            overflow: hidden; text-overflow: ellipsis; margin-bottom: 2px;
         }
         </style>
         """,
@@ -687,7 +719,7 @@ def _render_dept_grid(dept, status_filter, search_kw, key_prefix="d", day_str=""
         if kw:
             haystack = (
                 f"{b['code']} {b['name']} {b['loai']} {b['phong']} "
-                + " ".join(f"{p['TENBENHNHAN']} {p['MA_LK']} {p.get('GIOI_TINH', '')}" for p in b["patients"])
+                + " ".join(f"{p['TENBENHNHAN']} {p['MA_LK']} {p.get('GIOI_TINH', '')} {p.get('NAM_SINH', '')}" for p in b["patients"])
             ).lower()
             if kw not in haystack:
                 continue
@@ -739,11 +771,17 @@ def _render_dept_grid(dept, status_filter, search_kw, key_prefix="d", day_str=""
                     if b["status"] == "single":
                         cls, bcls, lbl = "bed-single", "badge-single", "1 BN"
                         p = b["patients"][0]
-                        g_str = f" • {p['GIOI_TINH']}" if p.get("GIOI_TINH") else ""
+                        st_icon = "✅ " if p.get("TRANG_THAI_BN") == "Ra viện" else ""
+                        yr = _extract_birth_year(p.get("NAM_SINH", ""))
+                        sub_parts = [x for x in [f"NS: {yr}" if yr else "", p.get("GIOI_TINH", "")] if x]
+                        sub_txt = " • ".join(sub_parts) if sub_parts else p.get("TRANG_THAI_BN", "")
+                        time_html = _format_card_time_html(p["START_DT"], p["END_DT"])
+
                         body = (
                             meta_line
-                            + f"<div class='bed-bn' title='{html.escape(p['TENBENHNHAN'])}'>{html.escape(p['TENBENHNHAN'])}</div>"
-                            + f"<div class='bed-sub'>LK: {html.escape(p['MA_LK'])}{html.escape(g_str)}</div>"
+                            + f"<div class='bed-bn' title='{html.escape(p['TENBENHNHAN'])}'>{st_icon}{html.escape(p['TENBENHNHAN'])}</div>"
+                            + f"<div class='bed-sub'>{html.escape(sub_txt)}</div>"
+                            + f"<div class='bed-time'>{time_html}</div>"
                         )
                     else:
                         if b.get("has_mixed_gender"):
@@ -754,9 +792,14 @@ def _render_dept_grid(dept, status_filter, search_kw, key_prefix="d", day_str=""
                             cls, bcls, lbl = "bed-shared", "badge-shared", f"Ghép ({b['n_patients']})"
                         lines = [meta_line]
                         for p in b["patients"][:2]:
-                            g_tag = f" [{p['GIOI_TINH']}]" if p.get("GIOI_TINH") else ""
+                            st_icon = "✅ " if p.get("TRANG_THAI_BN") == "Ra viện" else ""
+                            yr = _extract_birth_year(p.get("NAM_SINH", ""))
+                            tag_parts = [x for x in [yr, p.get("GIOI_TINH", "")] if x]
+                            tag_str = f" [{ ' • '.join(tag_parts) }]" if tag_parts else ""
+                            time_html = _format_card_time_html(p["START_DT"], p["END_DT"])
                             lines.append(
-                                f"<div class='bed-bn' title='{html.escape(p['TENBENHNHAN'])}'>• {html.escape(p['TENBENHNHAN'])}{html.escape(g_tag)}</div>"
+                                f"<div class='bed-bn' title='{html.escape(p['TENBENHNHAN'])}'>• {st_icon}{html.escape(p['TENBENHNHAN'])}{html.escape(tag_str)}</div>"
+                                f"<div class='bed-time'>{time_html}</div>"
                             )
                         body = "".join(lines)
 
@@ -1059,6 +1102,7 @@ def page_bed_management(ref_path, admin=True, render_kpi_fn=None, show_uploader=
 
             day_actual_bn = sum(d["actual_patients"] for d in day_depts)
             day_total_pd = sum(d["total_approved"] for d in day_depts)
+            day_empty_beds = sum(d["empty"] for d in day_depts)
             day_pct = (day_actual_bn / day_total_pd * 100) if day_total_pd else 0.0
 
             dept_chips = []
@@ -1068,6 +1112,7 @@ def page_bed_management(ref_path, admin=True, render_kpi_fn=None, show_uploader=
                 short_name = _short_dept_name(d["ma_khoa"], d["ten_khoa"])
                 d_bn = d["actual_patients"]
                 d_tot = d["total_approved"]
+                d_emp = d["empty"]
 
                 if not day_ov.empty:
                     ov_sub = day_ov[day_ov["Mã khoa"] == d["ma_khoa"]]
@@ -1077,29 +1122,33 @@ def page_bed_management(ref_path, admin=True, render_kpi_fn=None, show_uploader=
                 else:
                     d_ov = d_mixed = d_time = 0
 
-                if d_ov > 0:
-                    ov_desc = _format_overlap_desc(d_mixed, d_time)
-                    if d_bn < d_tot:
-                        has_weird_overlap_day = True
-                        dept_chips.append(
-                            f":red-background[:red[**🔴 {short_name}: {d_bn}/{d_tot} ({ov_desc} - CÒN GIƯỜNG!)**]]"
-                        )
-                    else:
-                        dept_chips.append(f":red[**{short_name}: {d_bn}/{d_tot} ({ov_desc})**]")
+                ov_desc = _format_overlap_desc(d_mixed, d_time)
+                has_conflict_or_shared = (d_ov > 0) or (d["shared"] > 0)
+
+                if has_conflict_or_shared and d_emp > 0:
+                    # CÒN GIƯỜNG TRỐNG NHƯNG VẪN NẰM GHÉP / TRÙNG -> CẢNH BÁO ĐỎ LÒM
+                    has_weird_overlap_day = True
+                    reason_txt = ov_desc if ov_desc else f"{d['shared']} ghép"
+                    dept_chips.append(
+                        f":red-background[:red[**🔴 {short_name}: {d_bn}/{d_tot} (Trống {d_emp} • {reason_txt})**]]"
+                    )
+                elif d_ov > 0:
+                    dept_chips.append(f":red[**{short_name}: {d_bn}/{d_tot} ({ov_desc})**]")
                 elif d["shared"] > 0:
-                    dept_chips.append(f":orange[**{short_name}: {d_bn}/{d_tot}**]")
+                    dept_chips.append(f":orange[**{short_name}: {d_bn}/{d_tot} (Trống {d_emp})**]")
                 elif d_bn > 0:
-                    dept_chips.append(f":blue[**{short_name}: {d_bn}/{d_tot}**]")
+                    dept_chips.append(f":blue[**{short_name}: {d_bn}/{d_tot} (Trống {d_emp})**]")
                 else:
                     dept_chips.append(f":gray[{short_name}: 0/{d_tot}]")
 
             dept_summary_str = "  •  ".join(dept_chips)
 
-            if pack["n_ov"] > 0:
-                day_ov_desc = _format_overlap_desc(pack["n_mixed"], pack["n_time_only"])
-                if has_weird_overlap_day:
-                    status_tag = f":red-background[:red[**🚨 CÒN GIƯỜNG VẪN TRÙNG ({day_ov_desc})**]]"
-                elif pack["n_mixed"] > 0:
+            day_ov_desc = _format_overlap_desc(pack["n_mixed"], pack["n_time_only"])
+            if has_weird_overlap_day:
+                lbl_detail = day_ov_desc if day_ov_desc else "nằm ghép"
+                status_tag = f":red-background[:red[**🚨 CÒN {day_empty_beds} GIƯỜNG TRỐNG VẪN TRÙNG ({lbl_detail})**]]"
+            elif pack["n_ov"] > 0:
+                if pack["n_mixed"] > 0:
                     status_tag = f"🚨 :red[**{day_ov_desc}**]"
                 else:
                     status_tag = f"⚠️ :orange[**{day_ov_desc}**]"
@@ -1115,14 +1164,14 @@ def page_bed_management(ref_path, admin=True, render_kpi_fn=None, show_uploader=
 
             exp_lbl = (
                 f"**{date_str}**  |  {status_tag}{extra_str}  |  "
-                f"Tổng BN: **{day_actual_bn}/{day_total_pd}** ({day_pct:.0f}%)  —  {dept_summary_str}"
+                f"Tổng BN: **{day_actual_bn}/{day_total_pd}** ({day_pct:.0f}%) • Trống: **{day_empty_beds}**  —  {dept_summary_str}"
             )
 
             with st.expander(exp_lbl, expanded=(total_days == 1)):
                 if has_weird_overlap_day:
                     st.error(
-                        "🔴 **CẢNH BÁO BẤT THƯỜNG:** Trong ngày này có khoa **số BN thực tế ít hơn số giường phê duyệt** "
-                        "(vẫn còn giường trống) nhưng vẫn phát sinh nằm trùng giường!"
+                        f"🔴 **CẢNH BÁO BẤT THƯỜNG:** Ngày **{date_str}** vẫn còn **{day_empty_beds} giường trống** "
+                        f"nhưng vẫn phát sinh nằm ghép / trùng giường!"
                     )
 
                 if not day_ov.empty:
