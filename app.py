@@ -14,6 +14,7 @@ import base64
 import pickle
 import unicodedata
 from io import BytesIO
+from datetime import datetime
 
 import pandas as pd
 import streamlit as st
@@ -207,6 +208,30 @@ def render_header():
             logo_html = f'<img src="data:image/jpeg;base64,{b64}" class="app-logo"/>'
         except Exception:
             logo_html = ""
+
+    # Lấy thông tin thời điểm nạp & khoảng ngày dữ liệu
+    updated_at = st.session_state.get('updated_at', '')
+    data_range = st.session_state.get('data_range', '')
+    if not updated_at or not data_range:
+        saved = load_latest_result()
+        if saved:
+            updated_at = updated_at or saved.get('updated_at', '')
+            data_range = data_range or saved.get('data_range', '')
+
+    meta_html = ""
+    if updated_at or data_range:
+        parts = []
+        if updated_at:
+            parts.append(f"🕒 Nạp lúc: <b>{updated_at}</b>")
+        if data_range:
+            parts.append(f"📅 Dữ liệu: <b>{data_range}</b>")
+        meta_html = (
+            "<div style='margin-left:auto;background:rgba(255,255,255,0.16);border:1px solid rgba(255,255,255,0.28);"
+            "border-radius:8px;padding:6px 12px;color:#FFFFFF;font-size:12.5px;display:flex;gap:14px;align-items:center;'>"
+            + " &nbsp;|&nbsp; ".join(parts)
+            + "</div>"
+        )
+
     st.markdown(
         f"""
         <div class="app-header">
@@ -215,6 +240,7 @@ def render_header():
                 <div class="app-title">BỆNH VIỆN ĐA KHOA ANH QUẤT</div>
                 <div class="app-sub">HỆ THỐNG KIỂM TRA LỖI BHYT (XML3) &amp; QUẢN LÝ GIƯỜNG BỆNH</div>
             </div>
+            {meta_html}
         </div>
         """,
         unsafe_allow_html=True,
@@ -473,10 +499,16 @@ def format_th_for_export(df_th):
     return df
 
 
-def save_latest_result(result, src_filename, used_ref):
+def save_latest_result(result, src_filename, used_ref, updated_at="", data_range=""):
     try:
         with open(LATEST_RESULT_FILE, 'wb') as fh:
-            pickle.dump({'result': result, 'src_filename': src_filename, 'used_ref': used_ref}, fh)
+            pickle.dump({
+                'result': result,
+                'src_filename': src_filename,
+                'used_ref': used_ref,
+                'updated_at': updated_at,
+                'data_range': data_range,
+            }, fh)
     except Exception:
         pass
 
@@ -593,14 +625,26 @@ def build_sidebar(admin=True):
                         st.session_state['th_page'] = 0
                         st.session_state['ct_page'] = 0
                         clear_cached_exports()
-                        save_latest_result(result, input_file.name, bool(ref_path and os.path.exists(ref_path)))
-                        reset_th_notes()
-
                         df_bed_new = extract_bed_records(df_raw)
+                        now_str = datetime.now().strftime("%d/%m/%Y %H:%M")
                         if not df_bed_new.empty:
+                            d_min = df_bed_new["START_DT"].min().strftime("%d/%m/%Y")
+                            d_max = df_bed_new["END_DT"].max().strftime("%d/%m/%Y")
+                            range_str = f"{d_min} → {d_max}"
                             save_bed_dataset(df_bed_new, input_file.name)
                             st.session_state.pop("bed_applied_filter", None)
+                        else:
+                            range_str = ""
 
+                        st.session_state['updated_at'] = now_str
+                        st.session_state['data_range'] = range_str
+                        save_latest_result(
+                            result, input_file.name,
+                            bool(ref_path and os.path.exists(ref_path)),
+                            updated_at=now_str,
+                            data_range=range_str,
+                        )
+                        reset_th_notes()
                         progress.empty()
                         st.toast(
                             f"✅ Xong {input_file.name}: {result['stats']['total_errors']:,} lỗi XML3 • {len(df_bed_new):,} dòng giường",
