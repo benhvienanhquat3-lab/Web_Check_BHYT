@@ -4,6 +4,9 @@ app.py
 =======================================================================
 Web App Streamlit: Hệ thống kiểm tra lỗi BHYT (XML3 / Excel)
 Bệnh viện Đa khoa Anh Quất.
+- Lưu trạng thái Đã sửa / Ghi chú bằng SQLite (WAL mode) theo Mã lỗi gốc
+  (giữ xuyên suốt các lần nạp file mới, không bị miss khi nhiều BS cùng tích).
+- Bật @st.cache_data đọc file kết quả .pkl giúp 30-50 tài khoản xem mượt.
 =======================================================================
 """
 
@@ -12,6 +15,8 @@ import sys
 import json
 import base64
 import pickle
+import hashlib
+import sqlite3
 import unicodedata
 from io import BytesIO
 from datetime import datetime
@@ -53,7 +58,7 @@ DATA_REF_DIR = os.path.join(BASE_DIR, 'data_ref')
 os.makedirs(DATA_REF_DIR, exist_ok=True)
 ACTIVE_REF_FILE = os.path.join(DATA_REF_DIR, '_active_ref.json')
 LATEST_RESULT_FILE = os.path.join(DATA_REF_DIR, '_latest_result.pkl')
-TH_NOTES_FILE = os.path.join(DATA_REF_DIR, '_th_notes.json')
+TH_NOTES_DB = os.path.join(DATA_REF_DIR, '_th_notes.db')
 LOGO_PATH = os.path.join(BASE_DIR, 'Logo.jpg')
 
 COLOR_MAIN = "#1565C0"
@@ -68,7 +73,6 @@ PAGE_CATALOG = "📂 Quản lý Danh mục Cổng"
 MAX_ALL_ROWS = 2000
 OPT_ALL_ROWS = f"Tất cả (≤{MAX_ALL_ROWS:,})"
 
-# Tỷ lệ độ rộng 5 ô lọc + 1 nút Đồng bộ (anh có thể tự chỉnh to/nhỏ ở đây)
 FILTER_COL_WIDTHS = [2.2, 1.6, 1.6, 1.1, 1.2, 0.45]
 
 st.set_page_config(
@@ -105,6 +109,7 @@ def inject_css():
             background: linear-gradient(100deg,#1565C0 0%,#1E88E5 55%,#42A5F5 100%);
             border-radius: 10px; padding: 7px 16px; margin-bottom: 6px;
             box-shadow: 0 4px 12px rgba(21,101,192,0.18);
+            flex-wrap: wrap;
         }
         .app-logo {
             height: 40px; width: 40px; border-radius: 8px; object-fit: cover;
@@ -209,7 +214,6 @@ def render_header():
         except Exception:
             logo_html = ""
 
-    # Lấy thông tin thời điểm nạp & khoảng ngày dữ liệu
     updated_at = st.session_state.get('updated_at', '')
     data_range = st.session_state.get('data_range', '')
     if not updated_at or not data_range:
@@ -305,7 +309,7 @@ def render_excel_table(df, key, height=820, editable_cols=None):
     ]:
         if narrow_col in df.columns:
             gb.configure_column(narrow_col, width=w, minWidth=w)
-    for hidden_col in ["Dòng", "Mã DV", "Mã DV_check"]:
+    for hidden_col in ["Dòng", "Mã DV", "Mã DV_check", "_err_key"]:
         if hidden_col in df.columns:
             gb.configure_column(hidden_col, hide=True)
     if "Đã sửa" in editable_cols and "Đã sửa" in df.columns:
@@ -374,6 +378,81 @@ def render_excel_table(df, key, height=820, editable_cols=None):
     return df
 
 
+# ======================= SQLITE (WAL) LƯU ĐÃ SỬA / GHI CHÚ XUYÊN FILE =======================
+_ERR_KEY_COLS = (
+    "Loại lỗi",
+    "Tên bệnh nhân",
+    "Khoa",
+    "Mã DV",
+    "NGAY_TH_YL",
+    "NGAY_KQ",
+    "Mã DV_check",
+    "NGAY_TH_YL_check",
+)
+
+
+def _get_notes_conn():
+    conn = sqlite3.connect(TH_NOTES_DB, timeout=10.0)
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute("PRAGMA busy_timeout=5000;")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS th_notes (
+            err_key TEXT PRIMARY KEY,
+            da_sua INTEGER NOT NULL DEFAULT 0,
+            ghi_chu TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL DEFAULT ''
+        )
+        """
+    )
+    return conn
+
+
+def _make_error_key(row):
+    """Sinh khóa định danh duy nhất cho từng lỗi (không phụ thuộc STT hay số dòng)."""
+    parts = [str(row.get(c, "") or "").strip() for c in _ERR_KEY_COLS]
+    raw = "|".join(parts)
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+
+def load_th_notes():
+    """Đọc toàn bộ ghi chú từ SQLite (an toàn khi nhiều người dùng đồng thời)."""
+    try:
+        with _get_notes_conn() as conn:
+            rows = conn.execute("SELECT err_key, da_sua, ghi_chu FROM th_notes").fetchall()
+        return {k: {"da_sua": bool(ds), "ghi_chu": str(gc or "")} for k, ds, gc in rows}
+    except Exception:
+        return {}
+
+
+def upsert_th_notes_batch(changes):
+    """Chỉ cập nhật đúng các dòng thay đổi -> tuyệt đối không ghi đè mất thao tác của BS khác."""
+    if not changes:
+        return
+    now_s = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+    try:
+        with _get_notes_conn() as conn:
+            for err_key, val in changes.items():
+                if val["da_sua"] or val["ghi_chu"]:
+                    conn.execute(
+                        """
+                        INSERT INTO th_notes (err_key, da_sua, ghi_chu, updated_at)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT(err_key) DO UPDATE SET
+                            da_sua = excluded.da_sua,
+                            ghi_chu = excluded.ghi_chu,
+                            updated_at = excluded.updated_at
+                        """,
+                        (err_key, 1 if val["da_sua"] else 0, val["ghi_chu"], now_s),
+                    )
+                else:
+                    conn.execute("DELETE FROM th_notes WHERE err_key = ?", (err_key,))
+            conn.commit()
+    except Exception:
+        pass
+
+
 # ======================= TIỆN ÍCH FILE / STATE / PHÂN QUYỀN =======================
 def load_active_ref():
     if os.path.exists(ACTIVE_REF_FILE):
@@ -404,30 +483,6 @@ def is_admin():
         return False
 
 
-def load_th_notes():
-    if os.path.exists(TH_NOTES_FILE):
-        try:
-            with open(TH_NOTES_FILE, 'r', encoding='utf-8') as fh:
-                return json.load(fh)
-        except Exception:
-            return {}
-    return {}
-
-
-def save_th_notes(notes):
-    try:
-        tmp_path = TH_NOTES_FILE + ".tmp"
-        with open(tmp_path, 'w', encoding='utf-8') as fh:
-            json.dump(notes, fh, ensure_ascii=False, indent=2)
-        os.replace(tmp_path, TH_NOTES_FILE)
-    except Exception:
-        pass
-
-
-def reset_th_notes():
-    save_th_notes({})
-
-
 def clear_cached_exports():
     st.session_state.pop('_excel_full_bytes', None)
     st.session_state.pop('_excel_filtered_bytes', None)
@@ -443,16 +498,18 @@ def attach_notes_to_th(df_th):
 
     notes = load_th_notes()
     df = df_th.copy()
+    err_keys = [_make_error_key(r) for _, r in df.iterrows()]
     da_sua_list, ghi_chu_list = [], []
-    for stt in df["STT"]:
-        rec = notes.get(str(stt), {})
+    for k in err_keys:
+        rec = notes.get(k, {})
         da_sua_list.append(bool(rec.get("da_sua", False)))
         ghi_chu_list.append(str(rec.get("ghi_chu", "")))
 
+    df["_err_key"] = err_keys
     df["Đã sửa"] = da_sua_list
     df["Ghi chú"] = ghi_chu_list
-    other_cols = [c for c in df.columns if c not in ("STT", "Đã sửa", "Ghi chú")]
-    return df[["STT", "Đã sửa", "Ghi chú"] + other_cols]
+    other_cols = [c for c in df.columns if c not in ("STT", "Đã sửa", "Ghi chú", "_err_key")]
+    return df[["STT", "Đã sửa", "Ghi chú"] + other_cols + ["_err_key"]]
 
 
 def sync_edited_notes(page_before_df, page_after_df):
@@ -462,38 +519,38 @@ def sync_edited_notes(page_before_df, page_after_df):
         return False
 
     before_map = {}
+    stt_to_key = {}
     for _, r in page_before_df.iterrows():
-        before_map[str(r["STT"])] = (
+        stt_s = str(r["STT"])
+        ek = str(r.get("_err_key", "") or _make_error_key(r))
+        stt_to_key[stt_s] = ek
+        before_map[stt_s] = (
             bool(r.get("Đã sửa", False)),
             str(r.get("Ghi chú", "") or "").strip(),
         )
 
     changes = {}
     for _, r in page_after_df.iterrows():
-        k = str(r["STT"])
+        stt_s = str(r["STT"])
         new_val = (
             bool(r.get("Đã sửa", False)),
             str(r.get("Ghi chú", "") or "").strip(),
         )
-        if k in before_map and before_map[k] != new_val:
-            changes[k] = {"da_sua": new_val[0], "ghi_chu": new_val[1]}
+        if stt_s in before_map and before_map[stt_s] != new_val:
+            ek = stt_to_key.get(stt_s)
+            if ek:
+                changes[ek] = {"da_sua": new_val[0], "ghi_chu": new_val[1]}
 
     if not changes:
         return False
 
-    notes = load_th_notes()
-    for k, val in changes.items():
-        if val["da_sua"] or val["ghi_chu"]:
-            notes[k] = val
-        else:
-            notes.pop(k, None)
-    save_th_notes(notes)
+    upsert_th_notes_batch(changes)
     clear_cached_exports()
     return True
 
 
 def format_th_for_export(df_th):
-    df = df_th.copy()
+    df = df_th.drop(columns=["_err_key"], errors="ignore").copy()
     if "Đã sửa" in df.columns:
         df["Đã sửa"] = df["Đã sửa"].apply(lambda x: "Đã sửa" if bool(x) else "")
     return df
@@ -501,7 +558,8 @@ def format_th_for_export(df_th):
 
 def save_latest_result(result, src_filename, used_ref, updated_at="", data_range=""):
     try:
-        with open(LATEST_RESULT_FILE, 'wb') as fh:
+        tmp = LATEST_RESULT_FILE + ".tmp"
+        with open(tmp, 'wb') as fh:
             pickle.dump({
                 'result': result,
                 'src_filename': src_filename,
@@ -509,15 +567,21 @@ def save_latest_result(result, src_filename, used_ref, updated_at="", data_range
                 'updated_at': updated_at,
                 'data_range': data_range,
             }, fh)
+        os.replace(tmp, LATEST_RESULT_FILE)
     except Exception:
         pass
+
+
+@st.cache_data(show_spinner=False)
+def _load_latest_result_cached(path, mtime):
+    with open(path, 'rb') as fh:
+        return pickle.load(fh)
 
 
 def load_latest_result():
     if os.path.exists(LATEST_RESULT_FILE):
         try:
-            with open(LATEST_RESULT_FILE, 'rb') as fh:
-                return pickle.load(fh)
+            return _load_latest_result_cached(LATEST_RESULT_FILE, os.path.getmtime(LATEST_RESULT_FILE))
         except Exception:
             return None
     return None
@@ -625,6 +689,7 @@ def build_sidebar(admin=True):
                         st.session_state['th_page'] = 0
                         st.session_state['ct_page'] = 0
                         clear_cached_exports()
+
                         df_bed_new = extract_bed_records(df_raw)
                         now_str = datetime.now().strftime("%d/%m/%Y %H:%M")
                         if not df_bed_new.empty:
@@ -633,18 +698,21 @@ def build_sidebar(admin=True):
                             range_str = f"{d_min} → {d_max}"
                             save_bed_dataset(df_bed_new, input_file.name)
                             st.session_state.pop("bed_applied_filter", None)
+                            st.session_state.pop("bed_selected_day", None)
                         else:
                             range_str = ""
 
                         st.session_state['updated_at'] = now_str
                         st.session_state['data_range'] = range_str
                         save_latest_result(
-                            result, input_file.name,
+                            result,
+                            input_file.name,
                             bool(ref_path and os.path.exists(ref_path)),
                             updated_at=now_str,
                             data_range=range_str,
                         )
-                        reset_th_notes()
+                        # Không xóa ghi chú cũ: SQLite tự giữ lại Đã sửa & Ghi chú theo Mã lỗi gốc!
+
                         progress.empty()
                         st.toast(
                             f"✅ Xong {input_file.name}: {result['stats']['total_errors']:,} lỗi XML3 • {len(df_bed_new):,} dòng giường",
@@ -710,7 +778,7 @@ def build_sidebar(admin=True):
         else:
             st.info(
                 "👨‍⚕️ **Chế độ Bác sĩ / Khoa phòng**\n\n"
-                "Lọc khoa/tên mình, tích **Đã sửa** hoặc gõ **Ghi chú** — hệ thống tự lưu về máy chủ."
+                "Lọc khoa/tên mình, tích **Đã sửa** hoặc gõ **Ghi chú** — hệ thống tự lưu về máy chủ (SQLite)."
             )
 
         st.markdown("---")
@@ -812,7 +880,6 @@ def render_results(result, src_filename, used_ref):
     df_th_with_notes = attach_notes_to_th(result['df_th'])
     stats = result['stats']
 
-    # ----- Dải KPI mảnh -----
     kpi_items = [
         ("Tổng dòng quét", f"{stats['total_rows']:,}", "#1565C0"),
         ("Tổng lỗi", f"{stats['total_errors']:,}", "#C62828"),
@@ -821,7 +888,6 @@ def render_results(result, src_filename, used_ref):
         kpi_items.append((f"ĐK {i}", f"{stats['by_dk'][col]:,}", DK_COLORS[i]))
     render_kpi_row(kpi_items)
 
-    # ----- 1 HÀNG DUY NHẤT: 5 Ô LỌC + 1 NÚT ĐỒNG BỘ GỌN -----
     khoa_options = sorted(
         [k for k in df_out['Khoa'].dropna().astype(str).str.strip().unique() if k]
     ) if 'Khoa' in df_out.columns else []
@@ -871,7 +937,6 @@ def render_results(result, src_filename, used_ref):
             clear_cached_exports()
             st.rerun()
 
-    # ----- Xác định tab đang chọn & tính dữ liệu lọc -----
     if "scan_subtab" not in st.session_state:
         st.session_state["scan_subtab"] = "th"
     cur_sub = st.session_state["scan_subtab"]
@@ -880,13 +945,11 @@ def render_results(result, src_filename, used_ref):
     only_errors = st.session_state.get("only_errors", True)
     df_ct_view = filter_chitiet(df_out, selected_dk, selected_khoa, selected_status, query, only_errors)
 
-    # Xóa cache Excel lọc nếu bộ lọc thay đổi
     filter_sig = (tuple(selected_dk), tuple(selected_khoa), selected_status, selected_fix, query, only_errors)
     if st.session_state.get('_excel_filtered_sig') != filter_sig:
         st.session_state.pop('_excel_filtered_bytes', None)
         st.session_state['_excel_filtered_sig'] = filter_sig
 
-    # Tính phân trang cho tab đang chọn
     active_df = df_th_view if cur_sub == "th" else df_ct_view
     page_key = "th_page" if cur_sub == "th" else "ct_page"
     size_key = "th_pgsz" if cur_sub == "th" else "ct_pgsz"
@@ -913,7 +976,6 @@ def render_results(result, src_filename, used_ref):
     done_count = int(df_th_with_notes["Đã sửa"].sum()) if not df_th_with_notes.empty else 0
     full_name = make_output_filename(src_filename)
 
-    # ----- THANH CÔNG CỤ TẤT CẢ TRONG 1 HÀNG: [TH | Chi tiết] + [Hiển thị...] + [Phân trang] + [Excel Full | Lọc] -----
     tb_th, tb_ct, tb_info, tb_sz, tb_nav, tb_ex_full, tb_ex_flt = st.columns(
         [1.05, 0.95, 2.65, 0.80, 1.50, 0.70, 0.70],
         gap="small",
@@ -1022,7 +1084,6 @@ def render_results(result, src_filename, used_ref):
                     st.session_state['_excel_filtered_bytes'] = buf.getvalue()
                 st.rerun()
 
-    # ----- BẢNG DỮ LIỆU CHÍNH -----
     if cur_sub == "th":
         if df_th_view.empty:
             st.info("Không có dòng nào khớp bộ lọc hiện tại.")
@@ -1035,12 +1096,12 @@ def render_results(result, src_filename, used_ref):
                 editable_cols=["Đã sửa", "Ghi chú"],
             )
             if sync_edited_notes(page_before, page_after):
-                st.toast("✅ Đã lưu trạng thái & ghi chú lên máy chủ!", icon="💾")
+                st.toast("✅ Đã lưu trạng thái & ghi chú lên máy chủ (SQLite)!", icon="💾")
     else:
         if df_ct_view.empty:
             st.info("Không có dòng nào khớp bộ lọc hiện tại.")
         else:
-            st.dataframe(df_ct_view.iloc[start:end], use_container_width=True, hide_index=True, height=660)
+            st.dataframe(df_ct_view.iloc[start:end], use_container_width=True, hide_index=True, height=820)
 
     if not used_ref:
         st.info("ℹ️ Lần quét này chưa dùng file tham chiếu — ĐK 5 & ĐK 6 (phần cấu hình) chưa được kiểm tra đầy đủ.")
